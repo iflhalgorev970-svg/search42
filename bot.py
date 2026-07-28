@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 user_to_admin_msg = {}
 admin_msg_to_user = {}
 
-# База данных городов (Добавлены Москва и Санкт-Петербург)
+# База данных городов
 CITIES = {
     "Москва": {"coords": (55.7558, 37.6173), "link": "https://t.me/MskChat42"},
     "Санкт-Петербург": {"coords": (59.9342, 30.3351), "link": "https://t.me/SpbChat42"},
@@ -42,7 +42,7 @@ CITIES = {
     "Пермь": {"coords": (58.0105, 56.2502), "link": "https://t.me/sperm42"},
     "Челябинск": {"coords": (55.1644, 61.4368), "link": "https://t.me/ChelChat42"},
     "Троицк": {"coords": (54.0674, 61.5491), "link": "https://t.me/Troitsk42"},
-    "Екатеринбург": {"coords": (56.8389, 60.6057), "link": "https://t.me/EkaBurg42"},
+    "Екатеринбург": {"coords": (56.8389, 60.6057), "link": "https://t.me/ekbratuxi"},
     "Тюмень": {"coords": (57.1522, 65.5272), "link": "https://t.me/Tyumen_42"},
     "Омск": {"coords": (54.9885, 73.3242), "link": "https://t.me/OMSK_42"},
     "Новосибирск": {"coords": (55.0084, 82.9357), "link": "https://t.me/+g_1_lZ-3W7BhMmM6"},
@@ -140,7 +140,6 @@ async def check_location_process(message: types.Message, state: FSMContext):
         city_link = CITIES[chosen_city]["link"]
         inline_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"Войти в чат ({chosen_city})", url=city_link)],
-            [InlineKeyboardButton(text="Всё круто, спасибо!", callback_data="cool_thanks")],
             [InlineKeyboardButton(text="Что-то не так...",
                                   callback_data=f"something_wrong:{message.location.latitude}:{message.location.longitude}")]
         ])
@@ -154,7 +153,7 @@ async def check_location_process(message: types.Message, state: FSMContext):
     else:
         # Локация не совпала
         inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=" Обратиться к администратору",
+            [InlineKeyboardButton(text="Обратиться к администратору",
                                   callback_data=f"req:{message.location.latitude}:{message.location.longitude}")]
         ])
 
@@ -193,12 +192,6 @@ async def process_ticket_location(message: types.Message, state: FSMContext):
 
 
 # --- ОБРАБОТКА ИНЛАЙН-КНОПОК ПОЛЬЗОВАТЕЛЯ ---
-
-@dp.callback_query(F.data == "cool_thanks")
-async def cool_thanks_handler(callback: types.CallbackQuery):
-    await callback.message.edit_text("🎉 Рады помочь! Приятного общения в чате!")
-    await callback.answer()
-
 
 @dp.callback_query(F.data.startswith("something_wrong:"))
 async def something_wrong_handler(callback: types.CallbackQuery):
