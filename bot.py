@@ -6,7 +6,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
 DB_NAME = "database.db"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
