@@ -1,369 +1,213 @@
 import asyncio
 import logging
-import datetime
-from html import escape
-
+import aiosqlite
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart, StateFilter
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ReplyKeyboardRemove
-)
-from geopy.distance import great_circle
+from aiogram.filters import Command, CommandStart
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.client.default import DefaultBotProperties
 
-# Импорты для Google Таблиц
-import gspread
-from google.oauth2.service_account import Credentials
+BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+DB_NAME = "database.db"
 
-# ⚠️ ВАЖНО: Вставь свой актуальный токен бота!
-BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
-ALLOWED_GROUP_ID = -5484524824
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+dp = Dispatcher()
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-logging.basicConfig(level=logging.INFO)
+# Кэш разрешенных чатов (Whitelist)
+allowed_chats = set()
 
-# --- НАСТРОЙКА GOOGLE SHEETS ---
-# Сюда вставь ссылку на свою Google Таблицу!
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1Xppxgp1fSkl46ku_VA5NLvRYmB4hSBKbj2FAinTIkUI/edit?gid=0#gid=0"
+# Строка для скрытого пинга
+PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
 
-try:
-    SCOPES = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    worksheet = gc.open_by_url(SHEET_URL).sheet1
-    google_sheets_enabled = True
-    logging.info("Успешное подключение к Google Sheets!")
-except Exception as e:
-    logging.error(f"Ошибка подключения к Google Sheets (проверь credentials.json и ссылку): {e}")
-    google_sheets_enabled = False
-
-# Функция асинхронной записи в таблицу
-async def log_to_sheets(user_id, username, action, geo="Нет гео"):
-    if not google_sheets_enabled:
-        return
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    username_safe = username if username else "Скрыт"
-    
-    def write_sync():
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Создаем таблицу статистики, если ее нет
+        await db.execute('''CREATE TABLE IF NOT EXISTS stats (
+                            user_id INTEGER,
+                            chat_id INTEGER,
+                            user_name TEXT,
+                            message_count INTEGER DEFAULT 0,
+                            PRIMARY KEY (user_id, chat_id))''')
+        await db.commit()
+        
+        # Загружаем вайтлист в оперативную память (set) для моментальной проверки
+        # Предполагается, что таблица old_bot_chats уже существует
         try:
-            worksheet.append_row([now, str(user_id), username_safe, action, geo])
+            async with db.execute('SELECT chat_id FROM old_bot_chats') as cursor:
+                async for row in cursor:
+                    allowed_chats.add(row[0])
+            logging.info(f"Loaded {len(allowed_chats)} allowed chats into whitelist.")
         except Exception as e:
-            logging.error(f"Ошибка записи в таблицу: {e}")
-            
-    await asyncio.to_thread(write_sync)
-
-# Словари для связи сообщений (переписка)
-user_to_admin_msg = {}
-admin_msg_to_user = {}
-
-# --- СТРУКТУРА БАЗЫ ДАННЫХ (Страна -> Город) ---
-DATABASE = {
-    "Россия": {
-        "Москва": {"coords": (55.7558, 37.6173), "link": "https://t.me/MskChat42"},
-        "Санкт-Петербург": {"coords": (59.9342, 30.3351), "link": "https://t.me/SpbChat42"},
-        "Калининград": {"coords": (54.7104, 20.4522), "link": "https://t.me/+6vdXRB4zF1FkZDZi"},
-        "Нижний Новгород": {"coords": (56.3269, 44.0059), "link": "https://t.me/Nizhny42"},
-        "Волгоград": {"coords": (48.7080, 44.5133), "link": "https://t.me/bratuhiVLG42"},
-        "Архангельск": {"coords": (64.5401, 40.5433), "link": "https://t.me/FortyTwo_Arkh"},
-        "Пермь": {"coords": (58.0105, 56.2502), "link": "https://t.me/sperm42"},
-        "Челябинск": {"coords": (55.1644, 61.4368), "link": "https://t.me/ChelChat42"},
-        "Троицк": {"coords": (54.0674, 61.5491), "link": "https://t.me/Troitsk42"},
-        "Екатеринбург": {"coords": (56.8389, 60.6057), "link": "https://t.me/ekbratuxi"},
-        "Тюмень": {"coords": (57.1522, 65.5272), "link": "https://t.me/Tyumen_42"},
-        "Омск": {"coords": (54.9885, 73.3242), "link": "https://t.me/OMSK_42"},
-        "Новосибирск": {"coords": (55.0084, 82.9357), "link": "https://t.me/+g_1_lZ-3W7BhMmM6"},
-        "Барнаул": {"coords": (53.3548, 83.7698), "link": "https://t.me/Barnaul42"},
-        "Владивосток": {"coords": (43.1198, 131.8869), "link": "https://t.me/VladChat42"},
-    },
-    "Беларусь": {
-        "Минск": {"coords": (53.9006, 27.5590), "link": "https://t.me/Minsk422"},
-    }
-}
-
-FLAT_CITIES = {}
-for country, cities in DATABASE.items():
-    for city, data in cities.items():
-        FLAT_CITIES[city] = data
-
-class UserFlow(StatesGroup):
-    waiting_auto_geo = State()
-    waiting_verification_geo = State()
-    waiting_ticket_geo = State()
-    waiting_admin_response = State()
-
-@dp.message.middleware()
-async def check_group_middleware(handler, event: types.Message, data):
-    if event.chat.type in ["group", "supergroup"]:
-        if event.chat.id != ALLOWED_GROUP_ID:
-            await event.chat.leave()
-            return
-    return await handler(event, data)
-
+            logging.error(f"Ошибка загрузки вайтлиста (возможно нет таблицы): {e}")
 
 @dp.message(CommandStart(), F.chat.type == "private")
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Найти чат", callback_data="find_chat")],
-        [InlineKeyboardButton(text="➕ Предложить новый чат", callback_data="missing_country_or_city")]
-    ])
-    await message.answer(
-        f"Привет, {escape(message.from_user.first_name)}! 🤙\n"
-        "Давай найдем чат 42братух в твоем городе.",
-        reply_markup=kb,
-        parse_mode="HTML"
+async def cmd_start(message: types.Message):
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔍 Найти чат")],
+            [KeyboardButton(text="📊 Статистика")]
+        ],
+        resize_keyboard=True
     )
+    await message.answer("Главное меню. Выбери действие:", reply_markup=kb)
 
-@dp.callback_query(F.data == "find_chat")
-async def find_chat_menu(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌍 Выбрать страну", callback_data="choose_country")],
-        [InlineKeyboardButton(text="📍 Автопоиск по Гео", callback_data="auto_search_geo")]
-    ])
-    await callback.message.edit_text("Как будем искать?", reply_markup=kb)
-    await callback.answer()
-
-@dp.callback_query(F.data == "choose_country")
-async def choose_country(callback: types.CallbackQuery):
-    buttons = []
-    for country in DATABASE.keys():
-        buttons.append([InlineKeyboardButton(text=country, callback_data=f"country:{country}")])
-    buttons.append([InlineKeyboardButton(text="❌ Моей страны нет в списке", callback_data="missing_country_or_city")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="find_chat")])
-    await callback.message.edit_text("Выбери свою страну:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("country:"))
-async def choose_city(callback: types.CallbackQuery):
-    country = callback.data.split(":")[1]
-    buttons = []
-    for city in DATABASE.get(country, {}).keys():
-        buttons.append([InlineKeyboardButton(text=city, callback_data=f"city:{city}")])
-    buttons.append([InlineKeyboardButton(text="❌ Моего города нет в списке", callback_data="missing_country_or_city")])
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад к странам", callback_data="choose_country")])
-    await callback.message.edit_text(f"Страна: <b>{country}</b>\nВыбери город:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("city:"))
-async def request_verification_geo(callback: types.CallbackQuery, state: FSMContext):
-    city = callback.data.split(":")[1]
-    await state.update_data(chosen_city=city)
-    await state.set_state(UserFlow.waiting_verification_geo)
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📍 Скинуть своё ГЕО", request_location=True)],
-        [KeyboardButton(text="❌ Не могу скинуть гео")]
-    ], resize_keyboard=True)
-    await callback.message.delete()
-    await callback.message.answer(
-        f"Ещё миллисекундочку... Нам нужно подтвердить, что ты находишься в районе города <b>{city}</b>.\n"
-        "Отправь свою геопозицию:", reply_markup=kb, parse_mode="HTML"
-    )
-    await callback.answer()
-
-@dp.message(UserFlow.waiting_verification_geo, F.location)
-async def verify_geo(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    chosen_city = data.get("chosen_city")
-    user_coords = (message.location.latitude, message.location.longitude)
-    target_coords = FLAT_CITIES[chosen_city]["coords"]
-    distance = great_circle(user_coords, target_coords).kilometers
-    
-    geo_str = f"{user_coords[0]}, {user_coords[1]}"
-    username = message.from_user.username or message.from_user.first_name
-    
-    if distance <= 100:
-        city_link = FLAT_CITIES[chosen_city]["link"]
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти в чат ({chosen_city})", url=city_link)]])
-        
-        await log_to_sheets(message.from_user.id, username, f"Выдан чат: {chosen_city}", geo_str)
-        
-        await message.answer(f"✅ Поздравляем, вот чат вашего города <b>{chosen_city}</b>!", reply_markup=kb, parse_mode="HTML")
-        await message.answer("Меню закрыто. Для нового поиска жми /start", reply_markup=ReplyKeyboardRemove())
-        await state.clear()
-    else:
-        note_text = f"Пытался зайти в {chosen_city}, но расстояние {round(distance)}км."
-        await log_to_sheets(message.from_user.id, username, f"Тикет (далеко от {chosen_city})", geo_str)
-        await send_ticket_to_admins(message.from_user, message.location.latitude, message.location.longitude, note=note_text)
-        await message.answer("Ой-ой, кажется ваша геопозиция не совпадает...\nВаш запрос зафиксирован, администратор скоро к вам обратится.", reply_markup=ReplyKeyboardRemove())
-        await state.set_state(UserFlow.waiting_admin_response)
-
-@dp.callback_query(F.data == "auto_search_geo")
-async def request_auto_geo(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(UserFlow.waiting_auto_geo)
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📍 Отправить ГЕО для поиска", request_location=True)]
-    ], resize_keyboard=True)
-    await callback.message.delete()
-    await callback.message.answer("Отправь свою геопозицию, и я найду ближайший чат!", reply_markup=kb)
-    await callback.answer()
-
-@dp.message(UserFlow.waiting_auto_geo, F.location)
-async def process_auto_geo(message: types.Message, state: FSMContext):
-    user_coords = (message.location.latitude, message.location.longitude)
-    geo_str = f"{user_coords[0]}, {user_coords[1]}"
-    username = message.from_user.username or message.from_user.first_name
-    
-    closest_city = None
-    min_dist = float('inf')
-    
-    for city, data in FLAT_CITIES.items():
-        dist = great_circle(user_coords, data["coords"]).kilometers
-        if dist < min_dist:
-            min_dist = dist
-            closest_city = city
+@dp.message(F.text == "📊 Статистика", F.chat.type == "private")
+async def global_stats(message: types.Message):
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Глобальный топ городов (связываем статистику с названиями из старой таблицы)
+        query = '''
+            SELECT o.city_name, SUM(s.message_count) as total
+            FROM stats s
+            JOIN old_bot_chats o ON s.chat_id = o.chat_id
+            GROUP BY s.chat_id
+            ORDER BY total DESC
+            LIMIT 10
+        '''
+        try:
+            async with db.execute(query) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            rows = []
             
-    if min_dist <= 100:
-        city_link = FLAT_CITIES[closest_city]["link"]
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти в чат ({closest_city})", url=city_link)]])
-        
-        await log_to_sheets(message.from_user.id, username, f"Автопоиск: выдан {closest_city}", geo_str)
-        
-        await message.answer(f"✅ Поздравляем! Найден чат 42Братух в <b>{closest_city}</b> (расстояние: {round(min_dist)} км).", reply_markup=kb, parse_mode="HTML")
-        await message.answer("Меню закрыто. Для нового поиска жми /start", reply_markup=ReplyKeyboardRemove())
-        await state.clear()
+    if not rows:
+        text = "📊 Пока нет данных о статистике."
     else:
-        note_text = f"Автопоиск. Ближайший город {closest_city} в {round(min_dist)}км."
-        await log_to_sheets(message.from_user.id, username, f"Тикет (автопоиск не нашел)", geo_str)
-        await send_ticket_to_admins(message.from_user, message.location.latitude, message.location.longitude, note=note_text)
-        await message.answer("Ой-ой, кажется вашего города нет в базе данных.\nВаш запрос зафиксирован, администратор скоро к вам обратится.", reply_markup=ReplyKeyboardRemove())
-        await state.set_state(UserFlow.waiting_admin_response)
+        text = "🌍 <b>Глобальный рейтинг городов:</b>\n\n"
+        for i, (city, total) in enumerate(rows, 1):
+            text += f"{i}. <b>{city}</b> — {total} сообщ.\n"
+            
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Моя статистика", callback_data="my_stats")]
+    ])
+    await message.answer(text, reply_markup=kb)
 
-@dp.callback_query(F.data == "missing_country_or_city")
-async def missing_data_ticket(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(UserFlow.waiting_ticket_geo)
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📍 Отправить ГЕО к заявке", request_location=True)],
-        [KeyboardButton(text="❌ Пропустить гео")]
-    ], resize_keyboard=True)
-    await callback.message.delete()
-    await callback.message.answer("Давай передадим запрос админам. Если можешь, прикрепи геопозицию для точности, или пропусти этот шаг:", reply_markup=kb)
-    await callback.answer()
+@dp.callback_query(F.data == "my_stats")
+async def my_stats_callback(callback: types.CallbackQuery):
+    async with aiosqlite.connect(DB_NAME) as db:
+        query = 'SELECT SUM(message_count) FROM stats WHERE user_id = ?'
+        async with db.execute(query, (callback.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            total = row[0] if row and row[0] else 0
+            
+    await callback.answer(f"Твоя статистика: {total} сообщений во всех чатах!", show_alert=True)
 
-@dp.message(UserFlow.waiting_verification_geo, F.text == "❌ Не могу скинуть гео")
-@dp.message(UserFlow.waiting_ticket_geo)
-async def process_manual_ticket(message: types.Message, state: FSMContext):
-    lat, lon = None, None
-    geo_str = "Нет гео"
-    username = message.from_user.username or message.from_user.first_name
-    
-    if message.location:
-        lat, lon = message.location.latitude, message.location.longitude
-        geo_str = f"{lat}, {lon}"
+@dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_top(message: types.Message):
+    if message.chat.id not in allowed_chats:
+        return
         
-    await log_to_sheets(message.from_user.id, username, "Тикет (ручная заявка / нет гео)", geo_str)
-    await send_ticket_to_admins(message.from_user, lat, lon, note="Запрос на добавление / проблемы с гео")
+    async with aiosqlite.connect(DB_NAME) as db:
+        query = '''
+            SELECT user_id, user_name, message_count 
+            FROM stats 
+            WHERE chat_id = ? 
+            ORDER BY message_count DESC 
+            LIMIT 10
+        '''
+        async with db.execute(query, (message.chat.id,)) as cursor:
+            rows = await cursor.fetchall()
+            
+    if not rows:
+        await message.answer("Статистика пока пуста.")
+        return
+        
+    text = f"🏆 <b>Топ-10 самых активных в этом чате:</b>\n\n"
+    medals = ["🥇", "🥈", "🥉"]
     
-    await message.answer("Ваш запрос зафиксирован, администрация скоро к вам обратится.", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(UserFlow.waiting_admin_response)
+    for i, (uid, uname, count) in enumerate(rows):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        safe_name = uname.replace("<", "&lt;").replace(">", "&gt;") if uname else "Пользователь"
+        text += f"{medal} <a href='tg://user?id={uid}'>{safe_name}</a> — {count}\n"
+        
+    await message.answer(text)
 
-async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note=""):
-    username = f"@{user.username}" if user.username else "нет юзернейма"
-    full_name_safe = escape(user.full_name)
-    geo_text = "Гео не предоставлено"
-    if lat and lon:
-        geo_text = f"<code>{lat}, {lon}</code>\n🗺 <a href='https://yandex.ru/maps/?pt={lon},{lat}&z=10&l=map'>Яндекс Карты</a>"
-    admin_text = (
-        f"🚨 <b>Новый тикет от пользователя!</b>\n\n"
-        f"👤 Пользователь: {full_name_safe}\n"
-        f"🆔 ID: <code>{user.id}</code>\n"
-        f"🔗 Ссылка: {username}\n"
-        f"🌍 Координаты: {geo_text}\n"
-        f"📝 Инфо: <i>{note}</i>\n\n"
-        f"💬 <i>Ответьте на это сообщение (Reply), чтобы написать пользователю!</i>\n\n"
-        f"👇 <b>Выберите город для выдачи или отклоните:</b>"
-    )
-    buttons = []
-    cities_keys = list(FLAT_CITIES.keys())
-    for i in range(0, len(cities_keys), 2):
-        row = [InlineKeyboardButton(text=cities_keys[i], callback_data=f"app:{user.id}:{i}")]
-        if i + 1 < len(cities_keys):
-            row.append(InlineKeyboardButton(text=cities_keys[i + 1], callback_data=f"app:{user.id}:{i + 1}"))
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="❌ Отказать", callback_data=f"rej:{user.id}")])
-    admin_kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    try:
-        sent_msg = await bot.send_message(
-            chat_id=ALLOWED_GROUP_ID,
-            text=admin_text,
-            reply_markup=admin_kb,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-        user_to_admin_msg[user.id] = sent_msg.message_id
-        admin_msg_to_user[sent_msg.message_id] = user.id
-    except Exception as e:
-        logging.error(f"Ошибка отправки тикета: {e}")
-
-@dp.callback_query(F.data.startswith("app:"))
-async def admin_approve(callback: types.CallbackQuery):
-    if callback.message.chat.id != ALLOWED_GROUP_ID:
+@dp.message(Command("call"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_call(message: types.Message):
+    if message.chat.id not in allowed_chats:
         return
-    _, user_id_str, city_idx_str = callback.data.split(":")
-    target_user_id = int(user_id_str)
-    cities_keys = list(FLAT_CITIES.keys())
-    city_name = cities_keys[int(city_idx_str)]
-    city_link = FLAT_CITIES[city_name]["link"]
-    admin_name = escape(callback.from_user.first_name)
-    try:
-        user_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти в чат ({city_name})", url=city_link)]])
-        await bot.send_message(chat_id=target_user_id, text=f"🎉 Администратор подобрал для тебя чат города <b>{city_name}</b>!", reply_markup=user_kb, parse_mode="HTML")
-        original_text = callback.message.html_text.split("💬")[0]
-        await callback.message.edit_text(f"{original_text}\n\n✅ <b>Тикет закрыт (Одобрено)</b>\n👤 Ответил: {admin_name}\n🏙 Выдан город: <b>{city_name}</b>", parse_mode="HTML", disable_web_page_preview=True)
-        await log_to_sheets(target_user_id, "Админ", f"Тикет одобрен админом ({city_name})", "-")
-    except Exception as e:
-        logging.error(f"Ошибка отправки пользователю {target_user_id}: {e}")
 
-@dp.callback_query(F.data.startswith("rej:"))
-async def admin_reject(callback: types.CallbackQuery):
-    if callback.message.chat.id != ALLOWED_GROUP_ID:
+    # Проверка на админа/создателя
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if member.status not in ['administrator', 'creator']:
         return
-    _, user_id_str = callback.data.split(":")
-    target_user_id = int(user_id_str)
-    admin_name = escape(callback.from_user.first_name)
+
+    # Удаляем исходное сообщение
     try:
-        await bot.send_message(chat_id=target_user_id, text="😔 К сожалению, администраторы не смогли подобрать чат по вашей заявке.")
-    except Exception as e:
+        await message.delete()
+    except Exception:
         pass
-    await callback.message.edit_text(f"{callback.message.html_text.split('💬')[0]}\n\n❌ <b>Тикет закрыт (Отклонено)</b>\n👤 Ответил: {admin_name}", parse_mode="HTML", disable_web_page_preview=True)
-    await log_to_sheets(target_user_id, "Админ", "Тикет отклонен админом", "-")
 
-@dp.message(F.chat.id == ALLOWED_GROUP_ID, F.reply_to_message)
-async def reply_from_group(message: types.Message):
-    target_user_id = admin_msg_to_user.get(message.reply_to_message.message_id)
-    if target_user_id:
-        try:
-            if message.text:
-                await bot.send_message(target_user_id, f"📩 <b>Сообщение от администратора:</b>\n\n{escape(message.text)}", parse_mode="HTML")
+    # Получаем текст админа
+    admin_text = message.text.replace("/call", "").strip()
+    if not admin_text:
+        admin_text = "Внимание!"
+
+    # Получаем юзеров чата из БД
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute('SELECT user_id FROM stats WHERE chat_id = ?', (message.chat.id,)) as cursor:
+            users = [row[0] async for row in cursor]
+            
+    if not users:
+        return
+
+    # Разбиваем на пачки по 5 человек
+    chunk_size = 5
+    user_chunks = [users[i:i + chunk_size] for i in range(0, len(users), chunk_size)]
+
+    for chunk in user_chunks:
+        # Динамически делим фразу
+        parts = []
+        chars_per_user = max(1, len(PING_PHRASE) // len(chunk))
+        
+        for i in range(len(chunk)):
+            if i == len(chunk) - 1:
+                # Последнему достается весь остаток строки
+                parts.append(PING_PHRASE[i * chars_per_user:])
             else:
-                await message.copy_to(target_user_id)
-            admin_msg_to_user[message.message_id] = target_user_id
-            await message.react([types.ReactionTypeEmoji(emoji="👍")])
-        except Exception:
-            pass
+                parts.append(PING_PHRASE[i * chars_per_user : (i+1) * chars_per_user])
 
-@dp.message(F.chat.type == "private", ~F.text.startswith("/"))
-async def user_text_message(message: types.Message):
-    admin_msg_id = user_to_admin_msg.get(message.from_user.id)
-    if admin_msg_id:
+        # Оборачиваем части в ссылки
+        ping_html = ""
+        for i, uid in enumerate(chunk):
+            ping_html += f'<a href="tg://user?id={uid}">{parts[i]}</a>'
+
+        # Прячем под спойлер, чтобы визуально не мусорить
+        final_text = f"{admin_text}\n\n<tg-spoiler>{ping_html}</tg-spoiler>"
+        
         try:
-            sent_msg = await message.copy_to(ALLOWED_GROUP_ID, reply_to_message_id=admin_msg_id)
-            admin_msg_to_user[sent_msg.message_id] = message.from_user.id
-            await message.answer("✉️ Сообщение передано администраторам!")
-        except Exception:
-            pass
+            sent_msg = await message.answer(final_text)
+            # Закрепляем со звуковым уведомлением
+            await sent_msg.pin(disable_notification=False)
+            await asyncio.sleep(1) # Защита от FloodWait
+        except Exception as e:
+            logging.error(f"Call error: {e}")
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def collect_stats(message: types.Message):
+    # Моментальная проверка через set в памяти
+    if message.chat.id not in allowed_chats:
+        return
+        
+    text = message.text or message.caption or ""
+    # Засчитываем сообщения длиннее 5 символов
+    if len(text) > 5:
+        uid = message.from_user.id
+        uname = message.from_user.full_name
+        cid = message.chat.id
+        
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Upsert-запрос (вставляем новую или обновляем счетчик)
+            await db.execute('''
+                INSERT INTO stats (user_id, chat_id, user_name, message_count) 
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(user_id, chat_id) DO UPDATE SET 
+                message_count = message_count + 1,
+                user_name = excluded.user_name
+            ''', (uid, cid, uname))
+            await db.commit()
 
 async def main():
+    logging.basicConfig(level=logging.INFO)
+    await init_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
