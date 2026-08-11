@@ -22,7 +22,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ⚠️ ВАЖНО: Вставь свой актуальный токен бота!
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
 ALLOWED_GROUP_ID = -5484524824
 
 bot = Bot(token=BOT_TOKEN)
@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 
 # --- НАСТРОЙКА GOOGLE SHEETS ---
 # Сюда вставь ссылку на свою Google Таблицу!
-SHEET_URL = "ТВОЯ_ССЫЛКА_НА_GOOGLE_ТАБЛИЦУ"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1Xppxgp1fSkl46ku_VA5NLvRYmB4hSBKbj2FAinTIkUI/edit?gid=0#gid=0"
 
 try:
     SCOPES = [
