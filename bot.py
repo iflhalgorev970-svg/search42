@@ -305,9 +305,8 @@ async def reply_from_group(message: types.Message):
         except Exception: pass
 
 # Пересылка ответов от юзера админам (если в состоянии тикета)
-@dp.message(F.chat.type == "private", ~F.text.startswith("/"))
+@dp.message(F.chat.type == "private", ~F.text.in_({"🔍 Найти чат", "📊 Статистика"}), ~F.text.startswith("/"))
 async def user_text_message(message: types.Message, state: FSMContext):
-    if message.text in ["🔍 Найти чат", "📊 Статистика"]: return
     admin_msg_id = user_to_admin_msg.get(message.from_user.id)
     if admin_msg_id:
         try:
