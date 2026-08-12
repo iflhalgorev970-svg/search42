@@ -20,24 +20,27 @@ PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
-        # Создаем таблицу статистики, если ее нет
+        # Создаем таблицу статистики
         await db.execute('''CREATE TABLE IF NOT EXISTS stats (
                             user_id INTEGER,
                             chat_id INTEGER,
                             user_name TEXT,
                             message_count INTEGER DEFAULT 0,
                             PRIMARY KEY (user_id, chat_id))''')
+        
+        # ДОБАВЛЕНО: Заставляем бота самого создавать таблицу вайтлиста, если ее нет
+        await db.execute('''CREATE TABLE IF NOT EXISTS old_bot_chats (
+                            chat_id INTEGER PRIMARY KEY,
+                            city_name TEXT)''')
         await db.commit()
         
-        # Загружаем вайтлист в оперативную память (set) для моментальной проверки
-        # Предполагается, что таблица old_bot_chats уже существует
         try:
             async with db.execute('SELECT chat_id FROM old_bot_chats') as cursor:
                 async for row in cursor:
                     allowed_chats.add(row[0])
             logging.info(f"Loaded {len(allowed_chats)} allowed chats into whitelist.")
         except Exception as e:
-            logging.error(f"Ошибка загрузки вайтлиста (возможно нет таблицы): {e}")
+            logging.error(f"Ошибка загрузки вайтлиста: {e}")
 
 @dp.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: types.Message):
