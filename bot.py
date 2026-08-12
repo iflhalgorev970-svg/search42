@@ -25,7 +25,7 @@ from google.oauth2.service_account import Credentials
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1Xppxgp1fSkl46ku_VA5NLvRYmB4hSBKbj2FAinTIkUI/edit?usp=sharing" # <--- ВСТАВЬ ССЫЛКУ СЮДА!
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1Xppxgp1fSkl46ku_VA5NLvRYmB4hSBKbj2FAinTIkUI/edit?gid=0#gid=0" # <--- ВСТАВЬ ССЫЛКУ СЮДА!
 ALLOWED_GROUP_ID = -5484524824 # <--- ВСТАВЬ ID ГРУППЫ АДМИНОВ (ДЛЯ ТИКЕТОВ)
 DB_NAME = "database.db"
 PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
