@@ -53,6 +53,30 @@ async def cmd_start(message: types.Message):
     )
     await message.answer("Главное меню. Выбери действие:", reply_markup=kb)
 
+@dp.message(Command("add_chat"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_add_chat(message: types.Message):
+    # Проверка на админа
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if member.status not in ['administrator', 'creator']:
+        return
+        
+    city_name = message.text.replace("/add_chat", "").strip()
+    if not city_name:
+        await message.answer("Укажи название города! Например: /add_chat Москва")
+        return
+        
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Создаем таблицу, если вдруг её всё ещё нет
+        await db.execute('''CREATE TABLE IF NOT EXISTS old_bot_chats (
+                            chat_id INTEGER PRIMARY KEY,
+                            city_name TEXT)''')
+        # Добавляем чат в базу
+        await db.execute('INSERT OR REPLACE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (message.chat.id, city_name))
+        await db.commit()
+        
+    allowed_chats.add(message.chat.id)
+    await message.answer(f"✅ Чат '{city_name}' (ID: {message.chat.id}) добавлен в белый список!\nСбор статистики запущен 🤙")
+
 @dp.message(F.text == "📊 Статистика", F.chat.type == "private")
 async def global_stats(message: types.Message):
     async with aiosqlite.connect(DB_NAME) as db:
