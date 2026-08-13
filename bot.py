@@ -64,25 +64,31 @@ for country, cities in DATABASE.items():
     for city, data in cities.items():
         FLAT_CITIES[city] = data
 
-# --- ИНИЦИАЛИЗАЦИЯ GOOGLE ТАБЛИЦ ---
-try:
-    SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    worksheet = gc.open_by_url(SHEET_URL).sheet1
-    google_sheets_enabled = True
-    logging.info("Успешное подключение к Google Sheets!")
-except Exception as e:
-    logging.error(f"Ошибка подключения к Google Sheets (проверь ссылку/файл): {e}")
-    google_sheets_enabled = False
+import csv
+import os
+
+# --- ИНИЦИАЛИЗАЦИЯ ЛОКАЛЬНОГО ФАЙЛА ЛОГОВ ---
+LOG_FILE = "users_log.csv"
+
+# Если файла еще нет, бот сам его создаст и напишет заголовки колонок
+if not os.path.exists(LOG_FILE):
+    # Используем utf-8-sig и разделитель ';', чтобы файл идеально открывался в Excel
+    with open(LOG_FILE, mode='w', encoding='utf-8-sig', newline='') as f:
+        writer = csv.writer(f, delimiter=';')
+        writer.writerow(["Дата", "ID", "Юзернейм", "Действие", "Гео"])
 
 async def log_to_sheets(user_id, username, action, geo="Нет гео"):
-    if not google_sheets_enabled: return
+    # Название функции оставил старым, чтобы не пришлось переписывать весь остальной код, 
+    # но теперь она пишет всё прямо в наш CSV-файл на хостинге!
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     username_safe = username if username else "Скрыт"
     def write_sync():
-        try: worksheet.append_row([now, str(user_id), username_safe, action, geo])
-        except Exception as e: logging.error(f"Ошибка записи в таблицу: {e}")
+        try:
+            with open(LOG_FILE, mode='a', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow([now, str(user_id), username_safe, action, geo])
+        except Exception as e:
+            logging.error(f"Ошибка записи в локальный файл: {e}")
     await asyncio.to_thread(write_sync)
 
 # --- ИНИЦИАЛИЗАЦИЯ БД (SQLITE) ---
