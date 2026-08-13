@@ -3,6 +3,7 @@ import logging
 import datetime
 import aiosqlite
 from html import escape
+from aiogram.types import FSInputFile
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command, StateFilter
@@ -25,7 +26,6 @@ from google.oauth2.service_account import Credentials
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1Xppxgp1fSkl46ku_VA5NLvRYmB4hSBKbj2FAinTIkUI/edit?gid=0#gid=0" # <--- ВСТАВЬ ССЫЛКУ СЮДА!
 ALLOWED_GROUP_ID = -5484524824 # <--- ВСТАВЬ ID ГРУППЫ АДМИНОВ (ДЛЯ ТИКЕТОВ)
 DB_NAME = "database.db"
 PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
@@ -345,6 +345,20 @@ async def my_stats_callback(callback: types.CallbackQuery):
             total = row[0] if row and row[0] else 0
     await callback.answer(f"Твоя статистика: {total} сообщений во всех чатах!", show_alert=True)
 
+@dp.message(Command("backup"), F.chat.id == ALLOWED_GROUP_ID)
+async def cmd_backup(message: types.Message):
+    # Отправляем лог-файл (Excel)
+    if os.path.exists(LOG_FILE):
+        await message.answer_document(FSInputFile(LOG_FILE), caption="📁 Бэкап логов (поиск чатов)")
+    else:
+        await message.answer("Файл логов пока не создан (никто еще не искал чаты).")
+        
+    # Отправляем базу данных (Статистика городов)
+    if os.path.exists(DB_NAME):
+        await message.answer_document(FSInputFile(DB_NAME), caption="🗄 Бэкап базы статистики")
+    else:
+        await message.answer("База статистики пока пуста.")
+        
 @dp.message(Command("add_chat"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_add_chat(message: types.Message):
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
