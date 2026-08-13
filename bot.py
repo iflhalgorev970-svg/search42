@@ -2,6 +2,8 @@ import asyncio
 import logging
 import datetime
 import aiosqlite
+import csv
+import os
 from html import escape
 from aiogram.types import FSInputFile
 
@@ -20,13 +22,10 @@ from aiogram.types import (
 from aiogram.client.default import DefaultBotProperties
 from geopy.distance import great_circle
 
-# Импорты для Google Таблиц
-import gspread
-from google.oauth2.service_account import Credentials
-
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
 ALLOWED_GROUP_ID = -5484524824 # <--- ВСТАВЬ ID ГРУППЫ АДМИНОВ (ДЛЯ ТИКЕТОВ)
+ADMIN_ID = 2103317502 # <--- Твой личный ID для получения бэкапов
 DB_NAME = "database.db"
 PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
 
@@ -64,9 +63,6 @@ for country, cities in DATABASE.items():
     for city, data in cities.items():
         FLAT_CITIES[city] = data
 
-import csv
-import os
-
 # --- ИНИЦИАЛИЗАЦИЯ ЛОКАЛЬНОГО ФАЙЛА ЛОГОВ ---
 LOG_FILE = "users_log.csv"
 
@@ -78,8 +74,7 @@ if not os.path.exists(LOG_FILE):
         writer.writerow(["Дата", "ID", "Юзернейм", "Действие", "Гео"])
 
 async def log_to_sheets(user_id, username, action, geo="Нет гео"):
-    # Название функции оставил старым, чтобы не пришлось переписывать весь остальной код, 
-    # но теперь она пишет всё прямо в наш CSV-файл на хостинге!
+    # Пишет всё прямо в наш CSV-файл на хостинге!
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     username_safe = username if username else "Скрыт"
     def write_sync():
@@ -345,7 +340,8 @@ async def my_stats_callback(callback: types.CallbackQuery):
             total = row[0] if row and row[0] else 0
     await callback.answer(f"Твоя статистика: {total} сообщений во всех чатах!", show_alert=True)
 
-@dp.message(Command("backup"), F.chat.id == ALLOWED_GROUP_ID)
+# ---> КОМАНДА БЭКАПА ДЛЯ АДМИНА В ЛС <---
+@dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_backup(message: types.Message):
     # Отправляем лог-файл (Excel)
     if os.path.exists(LOG_FILE):
