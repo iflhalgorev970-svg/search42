@@ -25,7 +25,7 @@ from geopy.distance import great_circle
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
-ALLOWED_GROUP_ID = -1004400238613 # ID группы админов
+ALLOWED_GROUP_ID = -1005484524824 # Исправленный ID супергруппы (с -100)
 ADMIN_ID = 2103317502 # Твой личный ID
 REQUESTS_TOPIC_ID = 46 # Тема "Заявки"
 APPROVED_TOPIC_ID = 42 # Тема "Одобренные"
@@ -98,7 +98,6 @@ async def init_db():
                             PRIMARY KEY (user_id, chat_id))''')
         await db.execute('''CREATE TABLE IF NOT EXISTS old_bot_chats (
                             chat_id INTEGER PRIMARY KEY, city_name TEXT)''')
-        # НОВАЯ ТАБЛИЦА ПРОФИЛЕЙ ЮЗЕРОВ
         await db.execute('''CREATE TABLE IF NOT EXISTS user_profiles (
                             user_id INTEGER PRIMARY KEY, 
                             username TEXT, 
@@ -117,23 +116,15 @@ async def update_profile(user_id, username, pm_start=False, chat_msg=False, acti
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     username_safe = username if username else "Без_юзернейма"
     async with aiosqlite.connect(DB_NAME) as db:
-        # Создаем профиль, если его еще нет
         await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', (user_id, username_safe))
-        
-        # Обновляем юзернейм (если он сменился)
         await db.execute('UPDATE user_profiles SET username = ? WHERE user_id = ?', (username_safe, user_id))
         
-        # Фиксируем дату первого общения в ЛС (сохраняется только первый раз)
         if pm_start:
             await db.execute('UPDATE user_profiles SET first_pm_date = COALESCE(first_pm_date, ?) WHERE user_id = ?', (now, user_id))
-        
-        # Фиксируем дату первого появления в городском чате
         if chat_msg:
             await db.execute('UPDATE user_profiles SET first_chat_date = COALESCE(first_chat_date, ?), chat_name = ? WHERE user_id = ?', (now, chat_name, user_id))
-            
         if action:
             await db.execute('UPDATE user_profiles SET last_action = ? WHERE user_id = ?', (action, user_id))
-            
         if geo:
             await db.execute('UPDATE user_profiles SET geo = ? WHERE user_id = ?', (geo, user_id))
             
@@ -244,7 +235,7 @@ async def verify_geo(message: types.Message, state: FSMContext):
         await state.clear()
     else:
         await update_profile(message.from_user.id, message.from_user.username, action=f"Тикет по гео (далеко от {chosen_city})", geo=geo_str)
-        await send_ticket_to_admins(message.from_user, message.location.latitude, message.location.longitude, f"Пытался зайти в {chosen_city}, но расстояние {round(distance)}км.")
+        await send_ticket_to_admins(message.from_user, message.location.latitude, message.location.longitude, f"Пытался зайти в {chosen_city}, но расстояние {round(distance)}км.", target_city=chosen_city)
         await message.answer("Ой-ой, геопозиция не совпадает. Запрос передан администратору.", reply_markup=ReplyKeyboardRemove())
         await state.set_state(UserFlow.waiting_admin_response)
 
@@ -263,7 +254,7 @@ async def process_auto_geo(message: types.Message, state: FSMContext):
         await state.clear()
     else:
         await update_profile(message.from_user.id, message.from_user.username, action=f"Тикет автопоиск (далеко от {closest_city})", geo=geo_str)
-        await send_ticket_to_admins(message.from_user, message.location.latitude, message.location.longitude, f"Автопоиск. Ближайший {closest_city} в {round(min_dist)}км.")
+        await send_ticket_to_admins(message.from_user, message.location.latitude, message.location.longitude, f"Автопоиск. Ближайший {closest_city} в {round(min_dist)}км.", target_city=closest_city)
         await message.answer("Вашего города нет в базе. Запрос передан администратору.", reply_markup=ReplyKeyboardRemove())
         await state.set_state(UserFlow.waiting_admin_response)
 
@@ -280,17 +271,52 @@ async def process_manual_ticket(message: types.Message, state: FSMContext):
     lat = message.location.latitude if message.location else None
     lon = message.location.longitude if message.location else None
     geo_str = f"{lat}, {lon}" if lat else None
+    
+    data = await state.get_data()
+    target_city = data.get("chosen_city")
+    
     await update_profile(message.from_user.id, message.from_user.username, action="Тикет (ручная заявка без гео)", geo=geo_str)
     await log_to_sheets(message.from_user.id, message.from_user.username, "Тикет (ручная заявка)")
-    await send_ticket_to_admins(message.from_user, lat, lon, note="Запрос на добавление / проблемы с гео")
+    
+    await send_ticket_to_admins(message.from_user, lat, lon, note="Запрос на добавление / проблемы с гео", target_city=target_city)
+    
     await message.answer("Запрос зафиксирован, администрация скоро к вам обратится.", reply_markup=ReplyKeyboardRemove())
     await state.set_state(UserFlow.waiting_admin_response)
 
 # --- АДМИН ПАНЕЛЬ (ФОРУМ) ---
-async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note=""):
+async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", target_city=None):
     username = f"@{user.username}" if user.username else "нет юзернейма"
     geo_text = f"<code>{lat}, {lon}</code>" if lat and lon else "Гео не предоставлено"
-    admin_text = f"🚨 <b>Новый тикет!</b>\n👤 {escape(user.full_name)}\n🆔 <code>{user.id}</code>\n🔗 {username}\n🌍 {geo_text}\n📝 <i>{note}</i>"
+    
+    chats_info = ""
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute('''
+            SELECT o.city_name, s.message_count 
+            FROM stats s 
+            JOIN old_bot_chats o ON s.chat_id = o.chat_id 
+            WHERE s.user_id = ?
+        ''', (user.id,)) as cursor:
+            rows = await cursor.fetchall()
+            
+    if rows:
+        chats_info = "\n💬 <b>Активность в чатах:</b>\n"
+        for city_name, count in rows:
+            chats_info += f" ├ {city_name}: {count} сообщ.\n"
+    else:
+        chats_info = "\n💬 <b>Активность в чатах:</b> 0 сообщений\n"
+        
+    applied_text = f"\n🎯 <b>Подавал заявку в:</b> {target_city}" if target_city else "\n🎯 <b>Подавал заявку в:</b> Город/Страна не из списка"
+
+    admin_text = (
+        f"🚨 <b>Новый тикет!</b>\n"
+        f"👤 {escape(user.full_name)}\n"
+        f"🆔 <code>{user.id}</code>\n"
+        f"🔗 {username}\n"
+        f"🌍 {geo_text}"
+        f"{applied_text}"
+        f"{chats_info}"
+        f"\n📝 <i>{note}</i>"
+    )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выдать разрешение на чат", callback_data=f"open_app:{user.id}")],
@@ -427,10 +453,8 @@ async def cmd_call(message: types.Message):
             await asyncio.sleep(1)
         except Exception: pass
 
-# --- ОБНОВЛЕННЫЙ БЭКАП (ТЕПЕРЬ СОБИРАЕТ И ОТПРАВЛЯЕТ ПРОФИЛИ) ---
 @dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_backup(message: types.Message):
-    # Генерируем свежую эксельку с профилями на лету
     prof_file = "user_profiles.csv"
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute('SELECT * FROM user_profiles') as cursor:
@@ -446,7 +470,6 @@ async def cmd_backup(message: types.Message):
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_stats(message: types.Message):
-    # Обновляем профиль (что юзер есть в таком-то чате)
     await update_profile(message.from_user.id, message.from_user.username, chat_msg=True, chat_name=message.chat.title)
     
     text = message.text or message.caption or ""
