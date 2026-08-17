@@ -25,7 +25,7 @@ from geopy.distance import great_circle
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
-ALLOWED_GROUP_ID = -1005484524824 # Исправленный ID супергруппы (с -100)
+ALLOWED_GROUP_ID = -1004400238613 # Исправленный ID супергруппы (с -100)
 ADMIN_ID = 2103317502 # Твой личный ID
 REQUESTS_TOPIC_ID = 46 # Тема "Заявки"
 APPROVED_TOPIC_ID = 42 # Тема "Одобренные"
