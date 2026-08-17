@@ -18,17 +18,18 @@ from aiogram.types import (
     InlineKeyboardButton,
     ReplyKeyboardRemove,
     FSInputFile,
-    BotCommand
+    BotCommand,
+    BotCommandScopeAllGroupChats
 )
 from aiogram.client.default import DefaultBotProperties
 from geopy.distance import great_circle
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
-ALLOWED_GROUP_ID = -1004400238613 # Исправленный ID супергруппы (с -100)
-ADMIN_ID = 2103317502 # Твой личный ID
-REQUESTS_TOPIC_ID = 46 # Тема "Заявки"
-APPROVED_TOPIC_ID = 42 # Тема "Одобренные"
+ALLOWED_GROUP_ID = -1004400238613 # ID ГРУППЫ АДМИНОВ
+ADMIN_ID = 2103317502 
+REQUESTS_TOPIC_ID = 46 
+APPROVED_TOPIC_ID = 42 
 
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
@@ -122,7 +123,7 @@ async def update_profile(user_id, username, pm_start=False, chat_msg=False, acti
         if pm_start:
             await db.execute('UPDATE user_profiles SET first_pm_date = COALESCE(first_pm_date, ?) WHERE user_id = ?', (now, user_id))
         if chat_msg:
-            await db.execute('UPDATE user_profiles SET first_chat_date = COALESCE(first_chat_date, ?), chat_name = ? WHERE user_id = ?', (now, chat_name, user_id))
+            await db.execute('UPDATE user_profiles SET first_chat_date = COALESCE(first_chat_date, ?) WHERE user_id = ?', (now, user_id))
         if action:
             await db.execute('UPDATE user_profiles SET last_action = ? WHERE user_id = ?', (action, user_id))
         if geo:
@@ -139,6 +140,42 @@ async def auto_fetch_chats():
                 allowed_chats.add(chat.id)
             except Exception: pass
         await db.commit()
+
+# --- ФУНКЦИЯ АВТО-БЭКАПА ---
+async def send_auto_backup(bot: Bot, trigger_text: str):
+    prof_file = "user_profiles.csv"
+    try:
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute('SELECT user_id, username, first_pm_date, first_chat_date, last_action, geo FROM user_profiles') as cursor:
+                users = await cursor.fetchall()
+                with open(prof_file, 'w', encoding='utf-8-sig', newline='') as f:
+                    writer = csv.writer(f, delimiter=';')
+                    writer.writerow(["ID", "Юзернейм", "Дата старта в ЛС", "Дата первого сообщения", "Последнее действие", "Гео", "Статистика по чатам (где и сколько)"])
+                    for u in users:
+                        uid = u[0]
+                        async with db.execute('''
+                            SELECT o.city_name, s.message_count 
+                            FROM stats s 
+                            JOIN old_bot_chats o ON s.chat_id = o.chat_id 
+                            WHERE s.user_id = ?
+                        ''', (uid,)) as c2:
+                            user_stats = await c2.fetchall()
+                        stats_str = ", ".join([f"{city}: {count}" for city, count in user_stats]) if user_stats else "Нет сообщений"
+                        writer.writerow([u[0], u[1], u[2], u[3], u[4], u[5], stats_str])
+                        
+        await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 <b>Авто-бэкап:</b> {trigger_text}")
+        await bot.send_document(chat_id=ADMIN_ID, document=FSInputFile(prof_file))
+        if os.path.exists(DB_NAME): await bot.send_document(chat_id=ADMIN_ID, document=FSInputFile(DB_NAME))
+        if os.path.exists(LOG_FILE): await bot.send_document(chat_id=ADMIN_ID, document=FSInputFile(LOG_FILE))
+    except Exception as e:
+        logging.error(f"Ошибка авто-бэкапа: {e}")
+
+# Сигналы запуска и остановки
+async def on_startup(bot: Bot):
+    await send_auto_backup(bot, "🟢 Запуск бота")
+
+async def on_shutdown(bot: Bot):
+    await send_auto_backup(bot, "🔴 Выключение/Обновление бота")
 
 class UserFlow(StatesGroup):
     waiting_auto_geo = State()
@@ -180,6 +217,32 @@ async def find_chat_start(message: types.Message, state: FSMContext):
         [InlineKeyboardButton(text="📍 Автопоиск по Гео", callback_data="auto_search_geo")]
     ])
     await message.answer("Как будем искать?", reply_markup=kb)
+
+@dp.message(F.text == "📊 Статистика", F.chat.type == "private")
+async def global_stats(message: types.Message):
+    async with aiosqlite.connect(DB_NAME) as db:
+        query = '''SELECT o.city_name, SUM(s.message_count) as total 
+                   FROM stats s 
+                   JOIN old_bot_chats o ON s.chat_id = o.chat_id 
+                   GROUP BY s.chat_id 
+                   ORDER BY total DESC LIMIT 10'''
+        try:
+            async with db.execute(query) as cursor: rows = await cursor.fetchall()
+        except Exception: rows = []
+        
+        async with db.execute('SELECT SUM(message_count) FROM stats WHERE user_id = ?', (message.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            total_personal = row[0] if row and row[0] else 0
+
+    text = "🌍 <b>Глобальный рейтинг городов:</b>\n\n"
+    if not rows: 
+        text += "Пока нет данных о статистике.\n"
+    else:
+        for i, (city, total) in enumerate(rows, 1): 
+            text += f"{i}. <b>{city}</b> — {total} сообщ.\n"
+    
+    text += f"\n💬 <b>Твои сообщения во всех чатах:</b> {total_personal}"
+    await message.answer(text)
 
 @dp.callback_query(F.data == "choose_country")
 async def choose_country(callback: types.CallbackQuery):
@@ -455,18 +518,7 @@ async def cmd_call(message: types.Message):
 
 @dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_backup(message: types.Message):
-    prof_file = "user_profiles.csv"
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT * FROM user_profiles') as cursor:
-            rows = await cursor.fetchall()
-            with open(prof_file, 'w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.writer(f, delimiter=';')
-                writer.writerow(["ID", "Юзернейм", "Дата старта в ЛС", "Дата первого сообщения в чате", "Последнее действие", "Гео", "Чат из базы"])
-                writer.writerows(rows)
-                
-    await message.answer_document(FSInputFile(prof_file), caption="📇 Твоя новая супер-база профилей пользователей!")
-    if os.path.exists(DB_NAME): await message.answer_document(FSInputFile(DB_NAME), caption="💾 Техническая база данных (для скрипта)")
-    if os.path.exists(LOG_FILE): await message.answer_document(FSInputFile(LOG_FILE), caption="📜 Сырой лог всех нажатий")
+    await send_auto_backup(bot, "Ручной запрос /backup")
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_stats(message: types.Message):
@@ -484,10 +536,14 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
     
+    # Регистрация системных хуков для авто-бэкапов
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
     await bot.set_my_commands([
         BotCommand(command="top", description="Топ-42 активных участников"),
         BotCommand(command="call", description="Массовый сбор (только для админов)")
-    ])
+    ], scope=BotCommandScopeAllGroupChats())
     
     await auto_fetch_chats()
     await dp.start_polling(bot)
