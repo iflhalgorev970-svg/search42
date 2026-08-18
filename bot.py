@@ -80,7 +80,7 @@ def handle_messages(message):
         conn.commit()
         conn.close()
 
-# Команда /call (Скрытое/массовое упоминание без закреплений!)
+# Команда /call
 @bot.message_handler(commands=['call'])
 def call_users(message):
     chat_id = message.chat.id
@@ -90,7 +90,6 @@ def call_users(message):
         bot.reply_to(message, "Эту команду можно использовать только в чатах комьюнити!")
         return
 
-    # Проверяем, админ ли вызывает (или оставляй доступ всем, если задумывалось для админов)
     if not is_admin(chat_id, user_id):
         bot.reply_to(message, "❌ Эта команда доступна только администраторам.")
         return
@@ -105,11 +104,22 @@ def call_users(message):
         bot.reply_to(message, "В базе пока нет пользователей для этого чата. Запусти парсер истории!")
         return
 
-    # Собираем красивый текст с упоминаниями по имени (скрытая ссылка на ID, не засоряет ники)
     call_text = "📢 **Внимание, сбор комьюнити!**\n\n"
     chunk = ""
     
-  for uid, name in users:
+    # ВОТ ЗДЕСЬ СЛЕДИ ЗА ОТСТУПАМИ (ровно 4 пробела в начале строки):
+    for uid, name in users:
+        clean_name = str(name).replace("[", "").replace("]", "")
+        mention = f"[{clean_name}](tg://user?id={uid}) "
+        
+        if len(chunk) + len(mention) > 4000:
+            bot.send_message(chat_id, call_text + chunk, parse_mode="Markdown")
+            chunk = ""
+        chunk += mention
+
+    if chunk:
+        bot.send_message(chat_id, call_text + chunk, parse_mode="Markdown")
+        
         # Очищаем имя от недопустимых символов для markdown
         clean_name = str(name).replace("[", "").replace("]", "")
         mention = f"[{clean_name}](tg://user?id={uid}) "
