@@ -165,4 +165,4 @@ def get_backup(message):
 
 if __name__ == "__main__":
     print("🤖 Бот запущен и готов к работе...")
-    bot.infinity_polling(skip_pending=True)
+    bot.infinity_polling(skip_pending=True, interval=1)
