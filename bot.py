@@ -109,7 +109,7 @@ def call_users(message):
     call_text = "📢 **Внимание, сбор комьюнити!**\n\n"
     chunk = ""
     
-    for uid, name > in users:
+  for uid, name in users:
         # Очищаем имя от недопустимых символов для markdown
         clean_name = str(name).replace("[", "").replace("]", "")
         mention = f"[{clean_name}](tg://user?id={uid}) "
