@@ -19,7 +19,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
     FSInputFile,
     BotCommand,
-    BotCommandScopeAllGroupChats
+    BotCommandScopeAllGroupChats,
+    LinkPreviewOptions # Добавили импорт для отключения превью
 )
 from aiogram.client.default import DefaultBotProperties
 from geopy.distance import great_circle
@@ -614,7 +615,8 @@ async def cmd_call(message: types.Message):
             f_id = current_ping["file_id"]
             
             if m_type == "text":
-                await message.reply(final_text)
+                # Отключаем превью для текстовых сообщений
+                await message.reply(final_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
             elif m_type == "photo":
                 await message.reply_photo(photo=f_id, caption=final_text)
             elif m_type == "video":
