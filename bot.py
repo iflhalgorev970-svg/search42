@@ -32,14 +32,13 @@ REQUESTS_TOPIC_ID = 46
 APPROVED_TOPIC_ID = 42 
 SETTINGS_TOPIC_ID = 69  # Топик для смены фразы калла
 
-# ЧАТЫ, КОТОРЫЕ НЕ БУДУТ СВЕТИТЬСЯ В ЛС И БАЗЕ ГОРОДОВ (но в них работают команды)
+# ЧАТЫ, КОТОРЫЕ НЕ БУДУТ СВЕТИТЬСЯ В ЛС И БАЗЕ ГОРОДОВ
 IGNORED_CHATS = {-1003923209265}
 
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
 DEFAULT_PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
 
-# Глобальная переменная для фразы калла (можно менять через топик настроек)
 current_ping_phrase = DEFAULT_PING_PHRASE
 
 CHAT_USERNAMES = [
@@ -82,7 +81,6 @@ for country, cities in DATABASE.items():
     for city, data in cities.items():
         FLAT_CITIES[city] = data
 
-# --- ИНИЦИАЛИЗАЦИЯ ФАЙЛОВ И БД ---
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, mode='w', encoding='utf-8-sig', newline='') as f:
         writer = csv.writer(f, delimiter=';')
@@ -119,7 +117,6 @@ async def init_db():
         async with db.execute('SELECT chat_id FROM old_bot_chats') as cursor:
             async for row in cursor: allowed_chats.add(row[0])
 
-# --- УМНОЕ ОБНОВЛЕНИЕ ПРОФИЛЯ ЮЗЕРА ---
 async def update_profile(user_id, username, pm_start=False, chat_msg=False, action=None, geo=None, chat_name=None):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     username_safe = username if username else "Без_юзернейма"
@@ -148,7 +145,6 @@ async def auto_fetch_chats():
             except Exception: pass
         await db.commit()
 
-# --- ФУНКЦИЯ АВТО-БЭКАПА ---
 async def send_auto_backup(bot: Bot, trigger_text: str):
     prof_file = "user_profiles.csv"
     try:
@@ -177,7 +173,6 @@ async def send_auto_backup(bot: Bot, trigger_text: str):
     except Exception as e:
         logging.error(f"Ошибка авто-бэкапа: {e}")
 
-# Сигналы запуска и остановки
 async def on_startup(bot: Bot):
     await send_auto_backup(bot, "🟢 Запуск бота")
 
@@ -205,7 +200,6 @@ async def check_group_middleware(handler, event: types.Message, data):
                     await db.commit()
     return await handler(event, data)
 
-# --- МЕНЮ ЛС ---
 @dp.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -355,7 +349,6 @@ async def process_manual_ticket(message: types.Message, state: FSMContext):
     await message.answer("Запрос зафиксирован, администрация скоро к вам обратится.", reply_markup=ReplyKeyboardRemove())
     await state.set_state(UserFlow.waiting_admin_response)
 
-# --- АДМИН ПАНЕЛЬ (ФОРУМ) ---
 async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", target_city=None):
     username = f"@{user.username}" if user.username else "нет юзернейма"
     geo_text = f"<code>{lat}, {lon}</code>" if lat and lon else "Гео не предоставлено"
@@ -468,27 +461,18 @@ async def reply_from_group(message: types.Message):
         try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
         except Exception: pass
 
-# --- УНИВЕРСАЛЬНЫЙ ОТЛАДЧИК ДЛЯ АДМИНСКОЙ ГРУППЫ ---
-@dp.message(F.chat.id == ALLOWED_GROUP_ID)
-async def debug_and_change_phrase(message: types.Message):
+# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ ТОПИК НАСТРОЕК (ID 69) ---
+@dp.message(F.chat.id == ALLOWED_GROUP_ID, F.message_thread_id == SETTINGS_TOPIC_ID)
+async def change_ping_phrase(message: types.Message):
     global current_ping_phrase
     if message.from_user.is_bot: return
     
-    # Выводим в лог хостинга точный ID темы, откуда пришло сообщение
-    print(f"📥 Сообщение в админке! Текст: '{message.text}', ID топика: {message.message_thread_id}")
+    new_phrase = message.text
+    if not new_phrase: return
     
-    # Если это та самая тема с ID 69 (или если текст начинается с восклицательного знака для проверки)
-    if message.message_thread_id == SETTINGS_TOPIC_ID:
-        new_phrase = message.text
-        if not new_phrase: return
-        
-        current_ping_phrase = new_phrase.strip()
-        try:
-            await message.reply(f"✅ Фраза успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
-        except Exception as e:
-            print(f"❌ Ошибка отправки ответа в топик: {e}")
-    
-# --- ГРУППОВЫЕ КОМАНДЫ (ТОП И CALL) ---
+    current_ping_phrase = new_phrase.strip()
+    await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
+
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_top(message: types.Message):
     chat_id = message.chat.id
@@ -590,7 +574,6 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
-    # В меню бота осталась только команда /top
     await bot.set_my_commands([
         BotCommand(command="top", description="Топ-42 активных участников")
     ], scope=BotCommandScopeAllGroupChats())
