@@ -468,17 +468,25 @@ async def reply_from_group(message: types.Message):
         try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
         except Exception: pass
 
-# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ ТОПИК НАСТРОЕК ---
-@dp.message(F.chat.id == ALLOWED_GROUP_ID, F.message_thread_id == SETTINGS_TOPIC_ID)
-async def change_ping_phrase(message: types.Message):
+# --- УНИВЕРСАЛЬНЫЙ ОТЛАДЧИК ДЛЯ АДМИНСКОЙ ГРУППЫ ---
+@dp.message(F.chat.id == ALLOWED_GROUP_ID)
+async def debug_and_change_phrase(message: types.Message):
     global current_ping_phrase
     if message.from_user.is_bot: return
     
-    new_phrase = message.text
-    if not new_phrase: return
+    # Выводим в лог хостинга точный ID темы, откуда пришло сообщение
+    print(f"📥 Сообщение в админке! Текст: '{message.text}', ID топика: {message.message_thread_id}")
     
-    current_ping_phrase = new_phrase.strip()
-    await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
+    # Если это та самая тема с ID 69 (или если текст начинается с восклицательного знака для проверки)
+    if message.message_thread_id == SETTINGS_TOPIC_ID:
+        new_phrase = message.text
+        if not new_phrase: return
+        
+        current_ping_phrase = new_phrase.strip()
+        try:
+            await message.reply(f"✅ Фраза успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
+        except Exception as e:
+            print(f"❌ Ошибка отправки ответа в топик: {e}")
     
 # --- ГРУППОВЫЕ КОМАНДЫ (ТОП И CALL) ---
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
