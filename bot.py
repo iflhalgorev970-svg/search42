@@ -30,7 +30,6 @@ ALLOWED_GROUP_ID = -1004400238613 # ID ГРУППЫ АДМИНОВ
 ADMIN_ID = 2103317502 
 REQUESTS_TOPIC_ID = 46 
 APPROVED_TOPIC_ID = 42 
-SETTINGS_TOPIC_ID = 69  # Топик для смены фразы калла
 
 # ЧАТЫ, КОТОРЫЕ НЕ БУДУТ СВЕТИТЬСЯ В ЛС И БАЗЕ ГОРОДОВ
 IGNORED_CHATS = {-1003923209265}
@@ -461,17 +460,17 @@ async def reply_from_group(message: types.Message):
         try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
         except Exception: pass
 
-# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ ТОПИК НАСТРОЕК (ID 69) ---
-@dp.message(F.chat.id == ALLOWED_GROUP_ID, F.message_thread_id == SETTINGS_TOPIC_ID)
-async def change_ping_phrase(message: types.Message):
+# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ КОМАНДУ /setphrase ---
+@dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
+async def set_new_phrase(message: types.Message):
     global current_ping_phrase
-    if message.from_user.is_bot: return
     
-    new_phrase = message.text
-    if not new_phrase: return
-    
-    current_ping_phrase = new_phrase.strip()
-    await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1:
+        current_ping_phrase = parts[1].strip()
+        await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
+    else:
+        await message.reply(f"⚠️ Ошибка! Напиши новую фразу сразу после команды.\nПример: <code>/setphrase Внимание всем сбор!</code>\n\nТекущая фраза: <b>{escape(current_ping_phrase)}</b>")
 
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_top(message: types.Message):
