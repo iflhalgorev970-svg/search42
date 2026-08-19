@@ -20,7 +20,7 @@ from aiogram.types import (
     FSInputFile,
     BotCommand,
     BotCommandScopeAllGroupChats,
-    LinkPreviewOptions # Добавили импорт для отключения превью
+    LinkPreviewOptions 
 )
 from aiogram.client.default import DefaultBotProperties
 from geopy.distance import great_circle
@@ -156,11 +156,21 @@ async def send_auto_backup(bot: Bot, trigger_text: str):
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute('SELECT user_id, username, first_pm_date, first_chat_date, last_action, geo FROM user_profiles') as cursor:
                 users = await cursor.fetchall()
+                
                 with open(prof_file, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.writer(f, delimiter=';')
-                    writer.writerow(["ID", "Юзернейм", "Дата старта в ЛС", "Дата первого сообщения", "Последнее действие", "Гео", "Статистика по чатам (где и сколько)"])
+                    
+                    # Формируем динамические заголовки
+                    cities_list = list(FLAT_CITIES.keys())
+                    headers = ["ID", "Юзернейм", "Дата старта в ЛС", "Дата первого сообщения", "Последнее действие", "Гео", "Общая статистика"] + cities_list
+                    writer.writerow(headers)
+                    
                     for u in users:
                         uid = u[0]
+                        raw_uname = u[1]
+                        # Добавляем @ для удобства, если юзернейм есть
+                        uname_safe = f"@{raw_uname}" if raw_uname and raw_uname != "Без_юзернейма" else "Без_юзернейма"
+                        
                         async with db.execute('''
                             SELECT o.city_name, s.message_count 
                             FROM stats s 
@@ -168,8 +178,19 @@ async def send_auto_backup(bot: Bot, trigger_text: str):
                             WHERE s.user_id = ?
                         ''', (uid,)) as c2:
                             user_stats = await c2.fetchall()
+                            
+                        # Собираем данные по городам в словарь
+                        stats_dict = {city: count for city, count in user_stats}
                         stats_str = ", ".join([f"{city}: {count}" for city, count in user_stats]) if user_stats else "Нет сообщений"
-                        writer.writerow([u[0], u[1], u[2], u[3], u[4], u[5], stats_str])
+                        
+                        # Собираем базовую строку
+                        row = [uid, uname_safe, u[2], u[3], u[4], u[5], stats_str]
+                        
+                        # Добавляем колонки для каждого города
+                        for city in cities_list:
+                            row.append(stats_dict.get(city, 0))
+                            
+                        writer.writerow(row)
                         
         await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 <b>Авто-бэкап:</b> {trigger_text}")
         await bot.send_document(chat_id=ADMIN_ID, document=FSInputFile(prof_file))
@@ -615,7 +636,6 @@ async def cmd_call(message: types.Message):
             f_id = current_ping["file_id"]
             
             if m_type == "text":
-                # Отключаем превью для текстовых сообщений
                 await message.reply(final_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
             elif m_type == "photo":
                 await message.reply_photo(photo=f_id, caption=final_text)
