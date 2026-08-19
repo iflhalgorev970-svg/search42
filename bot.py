@@ -512,11 +512,11 @@ async def cmd_call(message: types.Message):
         
         try:
             sent_msg = await message.answer(f"{admin_text}\n{ping_html}")
-            await sent_msg.pin(disable_notification=False)
+            # Строчка с закреплением (sent_msg.pin) удалена!
             await asyncio.sleep(1)
         except Exception: pass
 
-@dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
+@dp.message(Command("backup"), F.chat.type == "private", F.fromuser.id == ADMIN_ID)
 async def cmd_backup(message: types.Message):
     await send_auto_backup(bot, "Ручной запрос /backup")
 
