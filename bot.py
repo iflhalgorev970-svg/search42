@@ -32,14 +32,14 @@ REQUESTS_TOPIC_ID = 46
 APPROVED_TOPIC_ID = 42 
 SETTINGS_TOPIC_ID = 69  # Топик для смены фразы калла
 
-# ЧАТЫ, КОТОРЫЕ НЕ БУДУТ СВЕТИТЬСЯ В ЛС И БАЗЕ ГОРОДОВ
+# ЧАТЫ, КОТОРЫЕ НЕ БУДУТ СВЕТИТЬСЯ В ЛС И БАЗЕ ГОРОДОВ (но в них работают команды)
 IGNORED_CHATS = {-1003923209265}
 
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
 DEFAULT_PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
 
-# Глобальная переменная для фразы калла (можно менять через топик 69)
+# Глобальная переменная для фразы калла (можно менять через топик настроек)
 current_ping_phrase = DEFAULT_PING_PHRASE
 
 CHAT_USERNAMES = [
@@ -468,22 +468,25 @@ async def reply_from_group(message: types.Message):
         try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
         except Exception: pass
 
-# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ ТОПИК 69 ---
-@dp.message(F.chat.id == ALLOWED_GROUP_ID, F.message_thread_id == SETTINGS_TOPIC_ID)
-async def change_ping_phrase(message: types.Message):
+# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ ТОПИК НАСТРОЕК ---
+@dp.message(F.chat.id == ALLOWED_GROUP_ID)
+async def handle_admin_group(message: types.Message):
     global current_ping_phrase
     if message.from_user.is_bot: return
     
-    new_phrase = message.text
-    if not new_phrase: return
-    
-    current_ping_phrase = new_phrase.strip()
-    await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
+    if message.message_thread_id == SETTINGS_TOPIC_ID:
+        new_phrase = message.text
+        if not new_phrase: return
+        
+        current_ping_phrase = new_phrase.strip()
+        await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
 
 # --- ГРУППОВЫЕ КОМАНДЫ (ТОП И CALL) ---
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_top(message: types.Message):
-    if message.chat.id not in allowed_chats: return
+    chat_id = message.chat.id
+    if chat_id != ALLOWED_GROUP_ID and chat_id not in allowed_chats and chat_id not in IGNORED_CHATS: 
+        return
     await send_top_page(message, page=0)
 
 async def send_top_page(message_or_call, page):
@@ -526,15 +529,18 @@ async def paginate_top(callback: types.CallbackQuery):
 
 @dp.message(Command("call"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_call(message: types.Message):
-    if message.chat.id not in allowed_chats: return
-    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    chat_id = message.chat.id
+    if chat_id != ALLOWED_GROUP_ID and chat_id not in allowed_chats and chat_id not in IGNORED_CHATS: 
+        return
+        
+    member = await bot.get_chat_member(chat_id, message.from_user.id)
     if member.status not in ['administrator', 'creator']: return
     
     parts = message.text.split(maxsplit=1)
     admin_text = parts[1] if len(parts) > 1 else ""
         
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ?', (message.chat.id,)) as cursor:
+        async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ?', (chat_id,)) as cursor:
             users = await cursor.fetchall()
             
     if not users: return
@@ -577,6 +583,7 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
+    # В меню бота осталась только команда /top
     await bot.set_my_commands([
         BotCommand(command="top", description="Топ-42 активных участников")
     ], scope=BotCommandScopeAllGroupChats())
