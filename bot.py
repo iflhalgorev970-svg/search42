@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 # Настройки бота (замени на свой токен, если нужно, или подтягивай из окружения)
-TOKEN = "ТОКЕН_ТВОЕГО_БОТА"
+TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
 bot = telebot.TeleBot(TOKEN)
 
 DB_NAME = "database.db"
