@@ -40,18 +40,6 @@ DEFAULT_PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
 
 current_ping_phrase = DEFAULT_PING_PHRASE
 
-CHAT_USERNAMES = [
-    "@bratyxi42msk", "@SpbChat42", "@Nizhny42", "@bratuhiVLG42", 
-    "@FortyTwo_Arkh", "@sperm42", "@ChelChat42", "@Troitsk42", 
-    "@ekbratuxi", "@Tyumen_42", "@OMSK_42", "@Barnaul42", 
-    "@VladChat42", "@Minsk422"
-]
-
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
-dp = Dispatcher(storage=MemoryStorage())
-
-allowed_chats = set()
-
 DATABASE = {
     "Россия": {
         "Москва": {"coords": (55.7558, 37.6173), "link": "https://t.me/bratyxi42msk"},
@@ -76,9 +64,20 @@ DATABASE = {
 }
 
 FLAT_CITIES = {}
+CHAT_USERNAMES = []
 for country, cities in DATABASE.items():
     for city, data in cities.items():
         FLAT_CITIES[city] = data
+        # Автоматически достаем юзернеймы чатов из ссылок для привязки
+        link = data["link"]
+        if "t.me/" in link and "+" not in link:
+            uname = "@" + link.split("t.me/")[1]
+            CHAT_USERNAMES.append(uname)
+
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+dp = Dispatcher(storage=MemoryStorage())
+
+allowed_chats = set()
 
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, mode='w', encoding='utf-8-sig', newline='') as f:
@@ -136,12 +135,17 @@ async def update_profile(user_id, username, pm_start=False, chat_msg=False, acti
 
 async def auto_fetch_chats():
     async with aiosqlite.connect(DB_NAME) as db:
-        for uname in CHAT_USERNAMES:
-            try:
-                chat = await bot.get_chat(uname)
-                await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat.id, chat.title))
-                allowed_chats.add(chat.id)
-            except Exception: pass
+        for country, cities in DATABASE.items():
+            for city_name, data in cities.items():
+                link = data["link"]
+                if "t.me/" in link and "+" not in link:
+                    uname = "@" + link.split("t.me/")[1]
+                    try:
+                        chat = await bot.get_chat(uname)
+                        # Записываем в базу чистое название города вместо названия чата из телеграма
+                        await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat.id, city_name))
+                        allowed_chats.add(chat.id)
+                    except Exception: pass
         await db.commit()
 
 async def send_auto_backup(bot: Bot, trigger_text: str):
@@ -194,8 +198,14 @@ async def check_group_middleware(handler, event: types.Message, data):
         if chat_id != ALLOWED_GROUP_ID and chat_id not in IGNORED_CHATS:
             if chat_id not in allowed_chats:
                 allowed_chats.add(chat_id)
+                # Ищем, какому городу принадлежит этот чат по ссылке или названию
+                matched_city = "Неизвестный город"
+                for c_name, c_data in FLAT_CITIES.items():
+                    if event.chat.username and event.chat.username.lower() in c_data["link"].lower():
+                        matched_city = c_name
+                        break
                 async with aiosqlite.connect(DB_NAME) as db:
-                    await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat_id, event.chat.title or "Неизвестный чат"))
+                    await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat_id, matched_city))
                     await db.commit()
     return await handler(event, data)
 
@@ -555,7 +565,14 @@ async def cmd_backup(message: types.Message):
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_stats(message: types.Message):
-    await update_profile(message.from_user.id, message.from_user.username, chat_msg=True, chat_name=message.chat.title)
+    # Определяем название города для профиля
+    matched_city = "Неизвестный город"
+    for c_name, c_data in FLAT_CITIES.items():
+        if message.chat.username and message.chat.username.lower() in c_data["link"].lower():
+            matched_city = c_name
+            break
+            
+    await update_profile(message.from_user.id, message.from_user.username, chat_msg=True, chat_name=matched_city)
     
     text = message.text or message.caption or ""
     if len(text) > 5:
