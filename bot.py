@@ -36,9 +36,13 @@ IGNORED_CHATS = {-1003923209265}
 
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
-DEFAULT_PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
 
-current_ping_phrase = DEFAULT_PING_PHRASE
+# Обновленная глобальная переменная для хранения не только текста, но и медиа!
+current_ping = {
+    "type": "text",      # Может быть photo, video, audio, voice, animation
+    "file_id": None,     # ID файла для Телеграма
+    "text": "ПЯТЁРКА ПХ ПОБЕДА" # Сам текст/подпись (сохраняет HTML-теги)
+}
 
 DATABASE = {
     "Россия": {
@@ -141,7 +145,7 @@ async def auto_fetch_chats():
                     uname = "@" + link.split("t.me/")[1]
                     try:
                         chat = await bot.get_chat(uname)
-                        await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat.id, city_name))
+                        await db.execute('INSERT INTO old_bot_chats (chat_id, city_name) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET city_name=excluded.city_name', (chat.id, city_name))
                         allowed_chats.add(chat.id)
                     except Exception: pass
         await db.commit()
@@ -175,7 +179,6 @@ async def send_auto_backup(bot: Bot, trigger_text: str):
         logging.error(f"Ошибка авто-бэкапа: {e}")
 
 async def on_startup(bot: Bot):
-    # Отключили отправку базы при запуске, чтобы не спамить пустыми файлами
     logging.info("🟢 Бот запущен")
 
 async def on_shutdown(bot: Bot):
@@ -203,11 +206,10 @@ async def check_group_middleware(handler, event: types.Message, data):
                         matched_city = c_name
                         break
                 async with aiosqlite.connect(DB_NAME) as db:
-                    await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat_id, matched_city))
+                    await db.execute('INSERT INTO old_bot_chats (chat_id, city_name) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET city_name=excluded.city_name', (chat_id, matched_city))
                     await db.commit()
     return await handler(event, data)
 
-# --- РУЧНОЕ ВОССТАНОВЛЕНИЕ БАЗЫ ДАННЫХ ИЗ ФАЙЛА ---
 @dp.message(F.chat.type == "private", F.from_user.id == ADMIN_ID, F.document)
 async def restore_database(message: types.Message):
     doc_name = message.document.file_name
@@ -216,7 +218,6 @@ async def restore_database(message: types.Message):
         file = await bot.get_file(message.document.file_id)
         await bot.download_file(file.file_path, destination=doc_name)
         
-        # Если загрузили базу данных, инициализируем её заново
         if doc_name == DB_NAME:
             await init_db()
             await auto_fetch_chats()
@@ -250,7 +251,7 @@ async def global_stats(message: types.Message):
         query = '''SELECT o.city_name, SUM(s.message_count) as total 
                    FROM stats s 
                    JOIN old_bot_chats o ON s.chat_id = o.chat_id 
-                   GROUP BY s.chat_id 
+                   GROUP BY o.city_name 
                    ORDER BY total DESC LIMIT 10'''
         try:
             async with db.execute(query) as cursor: rows = await cursor.fetchall()
@@ -322,6 +323,14 @@ async def verify_geo(message: types.Message, state: FSMContext):
         await log_to_sheets(message.from_user.id, message.from_user.username, f"Выдан чат: {chosen_city}", geo_str)
         await message.answer(f"✅ Чат вашего города: <b>{chosen_city}</b>!", reply_markup=kb)
         await state.clear()
+        
+        try:
+            await bot.send_message(
+                chat_id=ALLOWED_GROUP_ID, 
+                message_thread_id=APPROVED_TOPIC_ID, 
+                text=f"🤖 <b>Авто-одобрение по ГЕО (Выбор города)</b>\n👤 {escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n📍 Выдан: <b>{chosen_city}</b>\n🌍 Расстояние: {round(distance)} км."
+            )
+        except Exception: pass
     else:
         await update_profile(message.from_user.id, message.from_user.username, action=f"Тикет по гео (далеко от {chosen_city})", geo=geo_str)
         await send_ticket_to_admins(message.from_user, message.location.latitude, message.location.longitude, f"Пытался зайти в {chosen_city}, но расстояние {round(distance)}км.", target_city=chosen_city)
@@ -341,6 +350,14 @@ async def process_auto_geo(message: types.Message, state: FSMContext):
         await log_to_sheets(message.from_user.id, message.from_user.username, f"Автопоиск: выдан {closest_city}", geo_str)
         await message.answer(f"✅ Найден чат <b>{closest_city}</b>.", reply_markup=kb)
         await state.clear()
+        
+        try:
+            await bot.send_message(
+                chat_id=ALLOWED_GROUP_ID, 
+                message_thread_id=APPROVED_TOPIC_ID, 
+                text=f"🤖 <b>Авто-одобрение по ГЕО (Автопоиск)</b>\n👤 {escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n📍 Выдан: <b>{closest_city}</b>\n🌍 Расстояние: {round(min_dist)} км."
+            )
+        except Exception: pass
     else:
         await update_profile(message.from_user.id, message.from_user.username, action=f"Тикет автопоиск (далеко от {closest_city})", geo=geo_str)
         await send_ticket_to_admins(message.from_user, message.location.latitude, message.location.longitude, f"Автопоиск. Ближайший {closest_city} в {round(min_dist)}км.", target_city=closest_city)
@@ -445,18 +462,16 @@ async def admin_approve(callback: types.CallbackQuery):
     await update_profile(int(user_id_str), None, action=f"Одобрен вручную ({city_name})")
     
     try:
-        await callback.message.edit_text(f"{callback.message.html_text}\n\n✅ <b>Одобрено: {city_name}</b>", reply_markup=None)
-        await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"✅ Заявка одобрена ({city_name}):\n{callback.message.html_text}")
-    except Exception: 
-        pass
+        await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"✅ <b>Заявка одобрена ({city_name}):</b>\n{callback.message.html_text}")
+    except Exception: pass
+        
+    try:
+        await callback.message.delete()
+    except Exception: pass
         
     try:
         await bot.send_message(chat_id=int(user_id_str), text=f"🎉 Админ выдал чат <b>{city_name}</b>!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти ({city_name})", url=FLAT_CITIES[city_name]["link"])]]))
-    except Exception:
-        try:
-            await callback.message.reply(f"⚠️ Заявка закрыта, но бот не смог отправить ссылку юзеру (возможно, он заблокировал бота).")
-        except Exception:
-            pass
+    except Exception: pass
             
     await callback.answer("Выдано!")
 
@@ -466,14 +481,16 @@ async def admin_reject(callback: types.CallbackQuery):
     await update_profile(int(user_id_str), None, action="Отказано админом")
     
     try:
-        await callback.message.edit_text(f"{callback.message.html_text}\n\n❌ <b>Отклонено</b>", reply_markup=None)
-    except Exception:
-        pass
+        await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"❌ <b>Заявка отклонена:</b>\n{callback.message.html_text}")
+    except Exception: pass
+
+    try:
+        await callback.message.delete()
+    except Exception: pass
         
     try: 
         await bot.send_message(chat_id=int(user_id_str), text="😔 Отказано в подборе чата.")
-    except Exception: 
-        pass
+    except Exception: pass
         
     await callback.answer("Отклонено!")
 
@@ -484,16 +501,39 @@ async def reply_from_group(message: types.Message):
         try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
         except Exception: pass
 
+# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА (ТЕКСТ/ФОТО/ВИДЕО + ФОРМАТИРОВАНИЕ) ---
 @dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
 async def set_new_phrase(message: types.Message):
-    global current_ping_phrase
+    global current_ping
     
-    parts = message.text.split(maxsplit=1)
-    if len(parts) > 1:
-        current_ping_phrase = parts[1].strip()
-        await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
+    # Берем сообщение, на которое ответили, либо текущее сообщение
+    target = message.reply_to_message or message
+    text_html = target.html_text or ""
+    
+    # Если не делали реплай, вырезаем саму команду из текста
+    if target == message:
+        raw_text = message.text or message.caption or ""
+        cmd_prefix = raw_text.split()[0] if raw_text else ""
+        if cmd_prefix and text_html.startswith(cmd_prefix):
+            text_html = text_html.replace(cmd_prefix, "", 1).strip()
+            
+    if target.photo:
+        current_ping = {"type": "photo", "file_id": target.photo[-1].file_id, "text": text_html}
+    elif target.video:
+        current_ping = {"type": "video", "file_id": target.video.file_id, "text": text_html}
+    elif target.audio:
+        current_ping = {"type": "audio", "file_id": target.audio.file_id, "text": text_html}
+    elif target.voice:
+        current_ping = {"type": "voice", "file_id": target.voice.file_id, "text": text_html}
+    elif target.animation:
+        current_ping = {"type": "animation", "file_id": target.animation.file_id, "text": text_html}
     else:
-        await message.reply(f"⚠️ Ошибка! Напиши новую фразу сразу после команды.\nПример: <code>/setphrase Внимание всем сбор!</code>\n\nТекущая фраза: <b>{escape(current_ping_phrase)}</b>")
+        if not text_html:
+            await message.reply("⚠️ Ошибка! Напиши текст после команды или сделай реплай на нужное сообщение (текст/фото/видео).")
+            return
+        current_ping = {"type": "text", "file_id": None, "text": text_html}
+        
+    await message.reply(f"✅ Установлен новый формат калла: <b>{current_ping['type'].upper()}</b>\n\n(Всё оформление, ссылки и медиа сохранены!)")
 
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_top(message: types.Message):
@@ -563,15 +603,34 @@ async def cmd_call(message: types.Message):
     for chunk in user_chunks:
         mentions = " ".join([f'<a href="tg://user?id={uid}">@{escape(str(name))}</a>' for uid, name in chunk])
         
-        if admin_text:
-            final_text = f"{admin_text}\n{mentions}\n{current_ping_phrase}"
-        else:
-            final_text = f"{mentions}\n{current_ping_phrase}"
+        # Собираем итоговый текст для отправки
+        parts_to_join = []
+        if admin_text: parts_to_join.append(admin_text)
+        parts_to_join.append(mentions)
+        if current_ping["text"]: parts_to_join.append(current_ping["text"])
+        
+        final_text = "\n".join(parts_to_join)
         
         try:
-            await message.reply(final_text)
+            m_type = current_ping["type"]
+            f_id = current_ping["file_id"]
+            
+            if m_type == "text":
+                await message.reply(final_text)
+            elif m_type == "photo":
+                await message.reply_photo(photo=f_id, caption=final_text)
+            elif m_type == "video":
+                await message.reply_video(video=f_id, caption=final_text)
+            elif m_type == "audio":
+                await message.reply_audio(audio=f_id, caption=final_text)
+            elif m_type == "voice":
+                await message.reply_voice(voice=f_id, caption=final_text)
+            elif m_type == "animation":
+                await message.reply_animation(animation=f_id, caption=final_text)
+                
             await asyncio.sleep(1)
-        except Exception: pass
+        except Exception as e: 
+            logging.error(f"Ошибка калла: {e}")
 
 @dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_backup(message: types.Message):
