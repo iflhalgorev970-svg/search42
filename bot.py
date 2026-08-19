@@ -68,7 +68,6 @@ CHAT_USERNAMES = []
 for country, cities in DATABASE.items():
     for city, data in cities.items():
         FLAT_CITIES[city] = data
-        # Автоматически достаем юзернеймы чатов из ссылок для привязки
         link = data["link"]
         if "t.me/" in link and "+" not in link:
             uname = "@" + link.split("t.me/")[1]
@@ -142,7 +141,6 @@ async def auto_fetch_chats():
                     uname = "@" + link.split("t.me/")[1]
                     try:
                         chat = await bot.get_chat(uname)
-                        # Записываем в базу чистое название города вместо названия чата из телеграма
                         await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat.id, city_name))
                         allowed_chats.add(chat.id)
                     except Exception: pass
@@ -177,10 +175,11 @@ async def send_auto_backup(bot: Bot, trigger_text: str):
         logging.error(f"Ошибка авто-бэкапа: {e}")
 
 async def on_startup(bot: Bot):
-    await send_auto_backup(bot, "🟢 Запуск бота")
+    # Отключили отправку базы при запуске, чтобы не спамить пустыми файлами
+    logging.info("🟢 Бот запущен")
 
 async def on_shutdown(bot: Bot):
-    await send_auto_backup(bot, "🔴 Выключение/Обновление бота")
+    await send_auto_backup(bot, "🔴 Выключение/Обновление бота (Сохрани этот бэкап!)")
 
 class UserFlow(StatesGroup):
     waiting_auto_geo = State()
@@ -198,7 +197,6 @@ async def check_group_middleware(handler, event: types.Message, data):
         if chat_id != ALLOWED_GROUP_ID and chat_id not in IGNORED_CHATS:
             if chat_id not in allowed_chats:
                 allowed_chats.add(chat_id)
-                # Ищем, какому городу принадлежит этот чат по ссылке или названию
                 matched_city = "Неизвестный город"
                 for c_name, c_data in FLAT_CITIES.items():
                     if event.chat.username and event.chat.username.lower() in c_data["link"].lower():
@@ -208,6 +206,22 @@ async def check_group_middleware(handler, event: types.Message, data):
                     await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat_id, matched_city))
                     await db.commit()
     return await handler(event, data)
+
+# --- РУЧНОЕ ВОССТАНОВЛЕНИЕ БАЗЫ ДАННЫХ ИЗ ФАЙЛА ---
+@dp.message(F.chat.type == "private", F.from_user.id == ADMIN_ID, F.document)
+async def restore_database(message: types.Message):
+    doc_name = message.document.file_name
+    if doc_name in [DB_NAME, LOG_FILE]:
+        await message.reply(f"⏳ Скачиваю файл <b>{doc_name}</b>...")
+        file = await bot.get_file(message.document.file_id)
+        await bot.download_file(file.file_path, destination=doc_name)
+        
+        # Если загрузили базу данных, инициализируем её заново
+        if doc_name == DB_NAME:
+            await init_db()
+            await auto_fetch_chats()
+            
+        await message.reply(f"✅ Файл <b>{doc_name}</b> успешно восстановлен! Бот готов к работе.")
 
 @dp.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -565,7 +579,6 @@ async def cmd_backup(message: types.Message):
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_stats(message: types.Message):
-    # Определяем название города для профиля
     matched_city = "Неизвестный город"
     for c_name, c_data in FLAT_CITIES.items():
         if message.chat.username and message.chat.username.lower() in c_data["link"].lower():
