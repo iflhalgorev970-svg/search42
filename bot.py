@@ -4,7 +4,7 @@ import re
 import time
 from datetime import datetime
 
-# Настройки бота (замени на свой токен, если нужно, или подтягивай из окружения)
+# Настройки бота
 TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
 bot = telebot.TeleBot(TOKEN)
 
@@ -55,7 +55,7 @@ def handle_messages(message):
     if message.chat.type == 'private':
         return
 
-    # Считаем только сообщения длиннее 5 символов (как ты и хотел для фильтрации мусора)
+    # Считаем только сообщения длиннее 5 символов
     text = message.text or message.caption or ""
     if len(text.strip()) >= 5:
         conn = sqlite3.connect(DB_NAME)
@@ -107,7 +107,6 @@ def call_users(message):
     call_text = "📢 **Внимание, сбор комьюнити!**\n\n"
     chunk = ""
     
-    # ВОТ ЗДЕСЬ СЛЕДИ ЗА ОТСТУПАМИ (ровно 4 пробела в начале строки):
     for uid, name in users:
         clean_name = str(name).replace("[", "").replace("]", "")
         mention = f"[{clean_name}](tg://user?id={uid}) "
@@ -119,20 +118,6 @@ def call_users(message):
 
     if chunk:
         bot.send_message(chat_id, call_text + chunk, parse_mode="Markdown")
-        
-        # Очищаем имя от недопустимых символов для markdown
-        clean_name = str(name).replace("[", "").replace("]", "")
-        mention = f"[{clean_name}](tg://user?id={uid}) "
-        
-        if len(chunk) + len(mention) > 4000:
-            bot.send_message(chat_id, call_text + chunk, parse_mode="Markdown")
-            chunk = ""
-        chunk += mention
-
-    if chunk:
-        bot.send_message(chat_id, call_text + chunk, parse_mode="Markdown")
-
-    # Удалили строчку с bot.pin_chat_message(...) — теперь ничего само не закрепляется!
 
 # Команда /top (Геймификация и рейтинг активности)
 @bot.message_handler(commands=['top'])
@@ -166,7 +151,6 @@ def show_top(message):
 # Команда /backup для скачивания базы
 @bot.message_handler(commands=['backup'])
 def get_backup(message):
-    # Можешь ограничить только для себя по своему user_id, либо оставить админам
     try:
         with open(DB_NAME, 'rb') as f:
             bot.send_document(message.chat.id, f, caption="💾 Твой актуальный файл базы данных.")
