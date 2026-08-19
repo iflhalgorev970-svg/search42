@@ -37,11 +37,10 @@ IGNORED_CHATS = {-1003923209265}
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
 
-# Обновленная глобальная переменная для хранения не только текста, но и медиа!
 current_ping = {
-    "type": "text",      # Может быть photo, video, audio, voice, animation
-    "file_id": None,     # ID файла для Телеграма
-    "text": "ПЯТЁРКА ПХ ПОБЕДА" # Сам текст/подпись (сохраняет HTML-теги)
+    "type": "text",      
+    "file_id": None,     
+    "text": "ПЯТЁРКА ПХ ПОБЕДА" 
 }
 
 DATABASE = {
@@ -399,7 +398,7 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
             SELECT o.city_name, s.message_count 
             FROM stats s 
             JOIN old_bot_chats o ON s.chat_id = o.chat_id 
-            WHERE s.user_id = ?
+            WHERE s.user_id = ? AND s.message_count > 0
         ''', (user.id,)) as cursor:
             rows = await cursor.fetchall()
             
@@ -501,16 +500,13 @@ async def reply_from_group(message: types.Message):
         try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
         except Exception: pass
 
-# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА (ТЕКСТ/ФОТО/ВИДЕО + ФОРМАТИРОВАНИЕ) ---
 @dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
 async def set_new_phrase(message: types.Message):
     global current_ping
     
-    # Берем сообщение, на которое ответили, либо текущее сообщение
     target = message.reply_to_message or message
     text_html = target.html_text or ""
     
-    # Если не делали реплай, вырезаем саму команду из текста
     if target == message:
         raw_text = message.text or message.caption or ""
         cmd_prefix = raw_text.split()[0] if raw_text else ""
@@ -548,9 +544,9 @@ async def send_top_page(message_or_call, page):
     offset = page * limit
     
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT user_name, message_count FROM stats WHERE chat_id = ? ORDER BY message_count DESC LIMIT ? OFFSET ?', (chat_id, limit, offset)) as cursor:
+        async with db.execute('SELECT user_name, message_count FROM stats WHERE chat_id = ? AND message_count > 0 ORDER BY message_count DESC LIMIT ? OFFSET ?', (chat_id, limit, offset)) as cursor:
             rows = await cursor.fetchall()
-        async with db.execute('SELECT COUNT(*) FROM stats WHERE chat_id = ?', (chat_id,)) as cursor:
+        async with db.execute('SELECT COUNT(*) FROM stats WHERE chat_id = ? AND message_count > 0', (chat_id,)) as cursor:
             total_users = (await cursor.fetchone())[0]
 
     if not rows and page == 0:
@@ -593,17 +589,19 @@ async def cmd_call(message: types.Message):
     admin_text = parts[1] if len(parts) > 1 else ""
         
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ?', (chat_id,)) as cursor:
+        async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ? AND message_count > 0', (chat_id,)) as cursor:
             users = await cursor.fetchall()
             
-    if not users: return
+    if not users: 
+        await message.reply("⚠️ В базе этого чата пока нет активных пользователей для калла.")
+        return
+        
     chunk_size = 5
     user_chunks = [users[i:i + chunk_size] for i in range(0, len(users), chunk_size)]
     
     for chunk in user_chunks:
         mentions = " ".join([f'<a href="tg://user?id={uid}">@{escape(str(name))}</a>' for uid, name in chunk])
         
-        # Собираем итоговый текст для отправки
         parts_to_join = []
         if admin_text: parts_to_join.append(admin_text)
         parts_to_join.append(mentions)
