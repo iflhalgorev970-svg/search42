@@ -30,7 +30,10 @@ ALLOWED_GROUP_ID = -1004400238613 # ID ГРУППЫ АДМИНОВ
 ADMIN_ID = 2103317502 
 REQUESTS_TOPIC_ID = 46 
 APPROVED_TOPIC_ID = 42 
-SETTINGS_TOPIC_ID = 69  # <--- Топик для смены фразы калла
+SETTINGS_TOPIC_ID = 69  # Топик для смены фразы калла
+
+# ЧАТЫ, КОТОРЫЕ НЕ БУДУТ СВЕТИТЬСЯ В ЛС И БАЗЕ ГОРОДОВ
+IGNORED_CHATS = {-1003923209265}
 
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
@@ -193,11 +196,13 @@ admin_msg_to_user = {}
 @dp.message.middleware()
 async def check_group_middleware(handler, event: types.Message, data):
     if event.chat.type in ["group", "supergroup"]:
-        if event.chat.id != ALLOWED_GROUP_ID and event.chat.id not in allowed_chats:
-            allowed_chats.add(event.chat.id)
-            async with aiosqlite.connect(DB_NAME) as db:
-                await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (event.chat.id, event.chat.title or "Неизвестный чат"))
-                await db.commit()
+        chat_id = event.chat.id
+        if chat_id != ALLOWED_GROUP_ID and chat_id not in IGNORED_CHATS:
+            if chat_id not in allowed_chats:
+                allowed_chats.add(chat_id)
+                async with aiosqlite.connect(DB_NAME) as db:
+                    await db.execute('INSERT OR IGNORE INTO old_bot_chats (chat_id, city_name) VALUES (?, ?)', (chat_id, event.chat.title or "Неизвестный чат"))
+                    await db.commit()
     return await handler(event, data)
 
 # --- МЕНЮ ЛС ---
