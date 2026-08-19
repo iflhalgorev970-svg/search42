@@ -418,19 +418,44 @@ async def admin_approve(callback: types.CallbackQuery):
     city_name = list(FLAT_CITIES.keys())[int(city_idx_str)]
     
     await update_profile(int(user_id_str), None, action=f"Одобрен вручную ({city_name})")
+    
+    # 1. ПЕРВЫМ ДЕЛОМ меняем сообщение в админке (чтобы кнопка точно пропала)
     try:
-        await bot.send_message(chat_id=int(user_id_str), text=f"🎉 Админ выдал чат <b>{city_name}</b>!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти ({city_name})", url=FLAT_CITIES[city_name]["link"])]]))
         await callback.message.edit_text(f"{callback.message.html_text}\n\n✅ <b>Одобрено: {city_name}</b>", reply_markup=None)
         await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"✅ Заявка одобрена ({city_name}):\n{callback.message.html_text}")
-    except Exception: pass
+    except Exception: 
+        pass
+        
+    # 2. ПОТОМ пытаемся отправить ссылку юзеру (в отдельном блоке!)
+    try:
+        await bot.send_message(chat_id=int(user_id_str), text=f"🎉 Админ выдал чат <b>{city_name}</b>!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти ({city_name})", url=FLAT_CITIES[city_name]["link"])]]))
+    except Exception:
+        # Если юзер заблокировал бота, админы получат уведомление, но заявка не зависнет!
+        try:
+            await callback.message.reply(f"⚠️ Заявка закрыта, но бот не смог отправить ссылку юзеру (возможно, он заблокировал бота).")
+        except Exception:
+            pass
+            
+    await callback.answer("Выдано!")
 
 @dp.callback_query(F.data.startswith("rej:"))
 async def admin_reject(callback: types.CallbackQuery):
     _, user_id_str = callback.data.split(":")
     await update_profile(int(user_id_str), None, action="Отказано админом")
-    try: await bot.send_message(chat_id=int(user_id_str), text="😔 Отказано в подборе чата.")
-    except Exception: pass
-    await callback.message.edit_text(f"{callback.message.html_text}\n\n❌ <b>Отклонено</b>", reply_markup=None)
+    
+    # 1. Сначала меняем интерфейс админа
+    try:
+        await callback.message.edit_text(f"{callback.message.html_text}\n\n❌ <b>Отклонено</b>", reply_markup=None)
+    except Exception:
+        pass
+        
+    # 2. Потом пишем юзеру
+    try: 
+        await bot.send_message(chat_id=int(user_id_str), text="😔 Отказано в подборе чата.")
+    except Exception: 
+        pass
+        
+    await callback.answer("Отклонено!")
 
 @dp.message(F.chat.id == ALLOWED_GROUP_ID, F.reply_to_message)
 async def reply_from_group(message: types.Message):
@@ -517,7 +542,7 @@ async def cmd_call(message: types.Message):
             await asyncio.sleep(1)
         except Exception: pass
 
-@dp.message(Command("backup"), F.chat.type == "private", F.fromuser.id == ADMIN_ID)
+@dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_backup(message: types.Message):
     await send_auto_backup(bot, "Ручной запрос /backup")
 
