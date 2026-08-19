@@ -41,7 +41,7 @@ DEFAULT_PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
 current_ping_phrase = DEFAULT_PING_PHRASE
 
 CHAT_USERNAMES = [
-    "@MskChat42", "@SpbChat42", "@Nizhny42", "@bratuhiVLG42", 
+    "@bratyxi42msk", "@SpbChat42", "@Nizhny42", "@bratuhiVLG42", 
     "@FortyTwo_Arkh", "@sperm42", "@ChelChat42", "@Troitsk42", 
     "@ekbratuxi", "@Tyumen_42", "@OMSK_42", "@Barnaul42", 
     "@VladChat42", "@Minsk422"
@@ -54,7 +54,7 @@ allowed_chats = set()
 
 DATABASE = {
     "Россия": {
-        "Москва": {"coords": (55.7558, 37.6173), "link": "https://t.me/MskChat42"},
+        "Москва": {"coords": (55.7558, 37.6173), "link": "https://t.me/bratyxi42msk"},
         "Санкт-Петербург": {"coords": (59.9342, 30.3351), "link": "https://t.me/SpbChat42"},
         "Калининград": {"coords": (54.7104, 20.4522), "link": "https://t.me/+6vdXRB4zF1FkZDZi"},
         "Нижний Новгород": {"coords": (56.3269, 44.0059), "link": "https://t.me/Nizhny42"},
@@ -460,7 +460,6 @@ async def reply_from_group(message: types.Message):
         try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
         except Exception: pass
 
-# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ КОМАНДУ /setphrase ---
 @dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
 async def set_new_phrase(message: types.Message):
     global current_ping_phrase
