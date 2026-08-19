@@ -514,30 +514,31 @@ async def cmd_call(message: types.Message):
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if member.status not in ['administrator', 'creator']: return
     
-    # Отрезаем команду (даже если она с @юзернеймом) и берем только текст админа
+    # Отрезаем команду и берем текст админа
     parts = message.text.split(maxsplit=1)
     admin_text = parts[1] if len(parts) > 1 else ""
         
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT user_id FROM stats WHERE chat_id = ?', (message.chat.id,)) as cursor:
-            users = [row[0] async for row in cursor]
+        # Достаем и ID, и имена пользователей
+        async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ?', (message.chat.id,)) as cursor:
+            users = await cursor.fetchall()
             
     if not users: return
     chunk_size = 5
     user_chunks = [users[i:i + chunk_size] for i in range(0, len(users), chunk_size)]
     
     for chunk in user_chunks:
-        # Прячем 5 человек в невидимые символы
-        invisible_mentions = "".join([f'<a href="tg://user?id={uid}">\u200b</a>' for uid in chunk])
+        # Формируем видимые теги через собачку: @Имя (ссылка на профиль)
+        mentions = " ".join([f'<a href="tg://user?id={uid}">@{escape(str(name))}</a>' for uid, name in chunk])
         
-        # Формируем итоговое сообщение: текст админа (если есть) + фраза-пинг
+        # Собираем сообщение по твоему формату: Текст -> Юзеры -> ПЯТЁРКА ПХ ПОБЕДА
         if admin_text:
-            final_text = f"{admin_text}\n\n{PING_PHRASE}{invisible_mentions}"
+            final_text = f"{admin_text}\n{mentions}\n{PING_PHRASE}"
         else:
-            final_text = f"{PING_PHRASE}{invisible_mentions}"
+            final_text = f"{mentions}\n{PING_PHRASE}"
         
         try:
-            # Делаем реплай на оригинальное сообщение админа
+            # Делаем реплай
             await message.reply(final_text)
             await asyncio.sleep(1)
         except Exception: pass
