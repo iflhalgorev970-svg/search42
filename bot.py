@@ -489,11 +489,10 @@ async def cmd_call(message: types.Message):
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if member.status not in ['administrator', 'creator']: return
     
-    try: await message.delete()
-    except Exception: pass
-    
-    admin_text = message.text.replace("/call", "").strip() or "Внимание!"
-    
+    # Отрезаем команду (даже если она с @юзернеймом) и берем только текст админа
+    parts = message.text.split(maxsplit=1)
+    admin_text = parts[1] if len(parts) > 1 else ""
+        
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute('SELECT user_id FROM stats WHERE chat_id = ?', (message.chat.id,)) as cursor:
             users = [row[0] async for row in cursor]
@@ -503,16 +502,18 @@ async def cmd_call(message: types.Message):
     user_chunks = [users[i:i + chunk_size] for i in range(0, len(users), chunk_size)]
     
     for chunk in user_chunks:
-        parts = []
-        chars_per_user = max(1, len(PING_PHRASE) // len(chunk))
-        for i in range(len(chunk)):
-            parts.append(PING_PHRASE[i * chars_per_user:] if i == len(chunk) - 1 else PING_PHRASE[i * chars_per_user : (i+1) * chars_per_user])
-            
-        ping_html = "".join([f'<a href="tg://user?id={uid}">{parts[i]}</a>' for i, uid in enumerate(chunk)])
+        # Прячем 5 человек в невидимые символы
+        invisible_mentions = "".join([f'<a href="tg://user?id={uid}">\u200b</a>' for uid in chunk])
+        
+        # Формируем итоговое сообщение: текст админа (если есть) + фраза-пинг
+        if admin_text:
+            final_text = f"{admin_text}\n\n{PING_PHRASE}{invisible_mentions}"
+        else:
+            final_text = f"{PING_PHRASE}{invisible_mentions}"
         
         try:
-            sent_msg = await message.answer(f"{admin_text}\n{ping_html}")
-            # Строчка с закреплением (sent_msg.pin) удалена!
+            # Делаем реплай на оригинальное сообщение админа
+            await message.reply(final_text)
             await asyncio.sleep(1)
         except Exception: pass
 
