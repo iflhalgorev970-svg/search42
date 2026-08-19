@@ -469,18 +469,17 @@ async def reply_from_group(message: types.Message):
         except Exception: pass
 
 # --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ ТОПИК НАСТРОЕК ---
-@dp.message(F.chat.id == ALLOWED_GROUP_ID)
-async def handle_admin_group(message: types.Message):
+@dp.message(F.chat.id == ALLOWED_GROUP_ID, F.message_thread_id == SETTINGS_TOPIC_ID)
+async def change_ping_phrase(message: types.Message):
     global current_ping_phrase
     if message.from_user.is_bot: return
     
-    if message.message_thread_id == SETTINGS_TOPIC_ID:
-        new_phrase = message.text
-        if not new_phrase: return
-        
-        current_ping_phrase = new_phrase.strip()
-        await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
-
+    new_phrase = message.text
+    if not new_phrase: return
+    
+    current_ping_phrase = new_phrase.strip()
+    await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
+    
 # --- ГРУППОВЫЕ КОМАНДЫ (ТОП И CALL) ---
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_top(message: types.Message):
