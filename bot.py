@@ -30,10 +30,14 @@ ALLOWED_GROUP_ID = -1004400238613 # ID ГРУППЫ АДМИНОВ
 ADMIN_ID = 2103317502 
 REQUESTS_TOPIC_ID = 46 
 APPROVED_TOPIC_ID = 42 
+SETTINGS_TOPIC_ID = 69  # <--- Топик для смены фразы калла
 
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
-PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
+DEFAULT_PING_PHRASE = "ПЯТЁРКА ПХ ПОБЕДА"
+
+# Глобальная переменная для фразы калла (можно менять через топик 69)
+current_ping_phrase = DEFAULT_PING_PHRASE
 
 CHAT_USERNAMES = [
     "@MskChat42", "@SpbChat42", "@Nizhny42", "@bratuhiVLG42", 
@@ -419,18 +423,15 @@ async def admin_approve(callback: types.CallbackQuery):
     
     await update_profile(int(user_id_str), None, action=f"Одобрен вручную ({city_name})")
     
-    # 1. ПЕРВЫМ ДЕЛОМ меняем сообщение в админке (чтобы кнопка точно пропала)
     try:
         await callback.message.edit_text(f"{callback.message.html_text}\n\n✅ <b>Одобрено: {city_name}</b>", reply_markup=None)
         await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"✅ Заявка одобрена ({city_name}):\n{callback.message.html_text}")
     except Exception: 
         pass
         
-    # 2. ПОТОМ пытаемся отправить ссылку юзеру (в отдельном блоке!)
     try:
         await bot.send_message(chat_id=int(user_id_str), text=f"🎉 Админ выдал чат <b>{city_name}</b>!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти ({city_name})", url=FLAT_CITIES[city_name]["link"])]]))
     except Exception:
-        # Если юзер заблокировал бота, админы получат уведомление, но заявка не зависнет!
         try:
             await callback.message.reply(f"⚠️ Заявка закрыта, но бот не смог отправить ссылку юзеру (возможно, он заблокировал бота).")
         except Exception:
@@ -443,13 +444,11 @@ async def admin_reject(callback: types.CallbackQuery):
     _, user_id_str = callback.data.split(":")
     await update_profile(int(user_id_str), None, action="Отказано админом")
     
-    # 1. Сначала меняем интерфейс админа
     try:
         await callback.message.edit_text(f"{callback.message.html_text}\n\n❌ <b>Отклонено</b>", reply_markup=None)
     except Exception:
         pass
         
-    # 2. Потом пишем юзеру
     try: 
         await bot.send_message(chat_id=int(user_id_str), text="😔 Отказано в подборе чата.")
     except Exception: 
@@ -463,6 +462,18 @@ async def reply_from_group(message: types.Message):
     if target_user_id and message.text:
         try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
         except Exception: pass
+
+# --- ИЗМЕНЕНИЕ ФРАЗЫ КАЛЛА ЧЕРЕЗ ТОПИК 69 ---
+@dp.message(F.chat.id == ALLOWED_GROUP_ID, F.message_thread_id == SETTINGS_TOPIC_ID)
+async def change_ping_phrase(message: types.Message):
+    global current_ping_phrase
+    if message.from_user.is_bot: return
+    
+    new_phrase = message.text
+    if not new_phrase: return
+    
+    current_ping_phrase = new_phrase.strip()
+    await message.reply(f"✅ Фраза для калла успешно изменена!\nНовая фраза: <b>{escape(current_ping_phrase)}</b>")
 
 # --- ГРУППОВЫЕ КОМАНДЫ (ТОП И CALL) ---
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
@@ -514,12 +525,10 @@ async def cmd_call(message: types.Message):
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
     if member.status not in ['administrator', 'creator']: return
     
-    # Отрезаем команду и берем текст админа
     parts = message.text.split(maxsplit=1)
     admin_text = parts[1] if len(parts) > 1 else ""
         
     async with aiosqlite.connect(DB_NAME) as db:
-        # Достаем и ID, и имена пользователей
         async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ?', (message.chat.id,)) as cursor:
             users = await cursor.fetchall()
             
@@ -528,17 +537,14 @@ async def cmd_call(message: types.Message):
     user_chunks = [users[i:i + chunk_size] for i in range(0, len(users), chunk_size)]
     
     for chunk in user_chunks:
-        # Формируем видимые теги через собачку: @Имя (ссылка на профиль)
         mentions = " ".join([f'<a href="tg://user?id={uid}">@{escape(str(name))}</a>' for uid, name in chunk])
         
-        # Собираем сообщение по твоему формату: Текст -> Юзеры -> ПЯТЁРКА ПХ ПОБЕДА
         if admin_text:
-            final_text = f"{admin_text}\n{mentions}\n{PING_PHRASE}"
+            final_text = f"{admin_text}\n{mentions}\n{current_ping_phrase}"
         else:
-            final_text = f"{mentions}\n{PING_PHRASE}"
+            final_text = f"{mentions}\n{current_ping_phrase}"
         
         try:
-            # Делаем реплай
             await message.reply(final_text)
             await asyncio.sleep(1)
         except Exception: pass
@@ -563,7 +569,6 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
     
-    # Регистрация системных хуков для авто-бэкапов
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
