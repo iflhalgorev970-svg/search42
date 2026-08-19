@@ -578,8 +578,7 @@ async def main():
     dp.shutdown.register(on_shutdown)
     
     await bot.set_my_commands([
-        BotCommand(command="top", description="Топ-42 активных участников"),
-        BotCommand(command="call", description="Массовый сбор (только для админов)")
+        BotCommand(command="top", description="Топ-42 активных участников")
     ], scope=BotCommandScopeAllGroupChats())
     
     await auto_fetch_chats()
