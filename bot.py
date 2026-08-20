@@ -27,12 +27,11 @@ from geopy.distance import great_circle
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = "8872040047:AAFDwAi6atIR4_I-rGE2Ky_-55hx24EUSHM"
-ALLOWED_GROUP_ID = -1004400238613 # ID ГРУППЫ АДМИНОВ
+ALLOWED_GROUP_ID = -1004400238613 
 ADMIN_ID = 2103317502 
 REQUESTS_TOPIC_ID = 46 
 APPROVED_TOPIC_ID = 42 
 
-# ЧАТЫ, КОТОРЫЕ НЕ БУДУТ СВЕТИТЬСЯ В ЛС И БАЗЕ ГОРОДОВ
 IGNORED_CHATS = {-1003923209265}
 
 DB_NAME = "database.db"
@@ -113,6 +112,11 @@ async def init_db():
                             last_action TEXT, 
                             geo TEXT, 
                             chat_name TEXT)''')
+        # Обновленная таблица черного списка (с датой окончания мута)
+        await db.execute('''CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY, until_date TEXT)''')
+        # Пытаемся добавить колонку, если база старая
+        try: await db.execute('ALTER TABLE blacklist ADD COLUMN until_date TEXT')
+        except Exception: pass
         await db.commit()
         
         async with db.execute('SELECT chat_id FROM old_bot_chats') as cursor:
@@ -159,8 +163,6 @@ async def send_auto_backup(bot: Bot, trigger_text: str):
                 
                 with open(prof_file, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.writer(f, delimiter=';')
-                    
-                    # Формируем динамические заголовки
                     cities_list = list(FLAT_CITIES.keys())
                     headers = ["ID", "Юзернейм", "Дата старта в ЛС", "Дата первого сообщения", "Последнее действие", "Гео", "Общая статистика"] + cities_list
                     writer.writerow(headers)
@@ -168,27 +170,16 @@ async def send_auto_backup(bot: Bot, trigger_text: str):
                     for u in users:
                         uid = u[0]
                         raw_uname = u[1]
-                        # Добавляем @ для удобства, если юзернейм есть
                         uname_safe = f"@{raw_uname}" if raw_uname and raw_uname != "Без_юзернейма" else "Без_юзернейма"
                         
-                        async with db.execute('''
-                            SELECT o.city_name, s.message_count 
-                            FROM stats s 
-                            JOIN old_bot_chats o ON s.chat_id = o.chat_id 
-                            WHERE s.user_id = ?
-                        ''', (uid,)) as c2:
+                        async with db.execute('''SELECT o.city_name, s.message_count FROM stats s JOIN old_bot_chats o ON s.chat_id = o.chat_id WHERE s.user_id = ?''', (uid,)) as c2:
                             user_stats = await c2.fetchall()
                             
-                        # Собираем данные по городам в словарь
                         stats_dict = {city: count for city, count in user_stats}
                         stats_str = ", ".join([f"{city}: {count}" for city, count in user_stats]) if user_stats else "Нет сообщений"
                         
-                        # Собираем базовую строку
                         row = [uid, uname_safe, u[2], u[3], u[4], u[5], stats_str]
-                        
-                        # Добавляем колонки для каждого города
-                        for city in cities_list:
-                            row.append(stats_dict.get(city, 0))
+                        for city in cities_list: row.append(stats_dict.get(city, 0))
                             
                         writer.writerow(row)
                         
@@ -211,17 +202,37 @@ class UserFlow(StatesGroup):
     waiting_ticket_geo = State()
     waiting_admin_response = State()
 
+class AdminFlow(StatesGroup):
+    waiting_mute_duration = State()
+
 user_to_admin_msg = {}
 admin_msg_to_user = {}
 
 @dp.message.middleware()
-async def check_group_middleware(handler, event: types.Message, data):
+async def global_middleware(handler, event: types.Message, data):
+    # 1. Мут/Бан работает ТОЛЬКО в ЛС (private)
+    if event.chat.type == "private":
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute('SELECT until_date FROM blacklist WHERE user_id = ?', (event.from_user.id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    if row[0] is None:
+                        return # Пермабан в ЛС
+                    else:
+                        until_date = datetime.datetime.fromisoformat(row[0])
+                        if datetime.datetime.now() < until_date:
+                            return # Всё ещё в муте в ЛС
+                        else:
+                            await db.execute('DELETE FROM blacklist WHERE user_id = ?', (event.from_user.id,))
+                            await db.commit()
+                            
+    # 2. Тихое добавление новых чатов в базу
     if event.chat.type in ["group", "supergroup"]:
         chat_id = event.chat.id
         if chat_id != ALLOWED_GROUP_ID and chat_id not in IGNORED_CHATS:
             if chat_id not in allowed_chats:
                 allowed_chats.add(chat_id)
-                matched_city = "Неизвестный город"
+                matched_city = "Скрытый/Неизвестный чат"
                 for c_name, c_data in FLAT_CITIES.items():
                     if event.chat.username and event.chat.username.lower() in c_data["link"].lower():
                         matched_city = c_name
@@ -238,11 +249,9 @@ async def restore_database(message: types.Message):
         await message.reply(f"⏳ Скачиваю файл <b>{doc_name}</b>...")
         file = await bot.get_file(message.document.file_id)
         await bot.download_file(file.file_path, destination=doc_name)
-        
         if doc_name == DB_NAME:
             await init_db()
             await auto_fetch_chats()
-            
         await message.reply(f"✅ Файл <b>{doc_name}</b> успешно восстановлен! Бот готов к работе.")
 
 @dp.message(CommandStart(), F.chat.type == "private")
@@ -344,13 +353,7 @@ async def verify_geo(message: types.Message, state: FSMContext):
         await log_to_sheets(message.from_user.id, message.from_user.username, f"Выдан чат: {chosen_city}", geo_str)
         await message.answer(f"✅ Чат вашего города: <b>{chosen_city}</b>!", reply_markup=kb)
         await state.clear()
-        
-        try:
-            await bot.send_message(
-                chat_id=ALLOWED_GROUP_ID, 
-                message_thread_id=APPROVED_TOPIC_ID, 
-                text=f"🤖 <b>Авто-одобрение по ГЕО (Выбор города)</b>\n👤 {escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n📍 Выдан: <b>{chosen_city}</b>\n🌍 Расстояние: {round(distance)} км."
-            )
+        try: await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"🤖 <b>Авто-одобрение по ГЕО (Выбор города)</b>\n👤 {escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n📍 Выдан: <b>{chosen_city}</b>\n🌍 Расстояние: {round(distance)} км.")
         except Exception: pass
     else:
         await update_profile(message.from_user.id, message.from_user.username, action=f"Тикет по гео (далеко от {chosen_city})", geo=geo_str)
@@ -371,13 +374,7 @@ async def process_auto_geo(message: types.Message, state: FSMContext):
         await log_to_sheets(message.from_user.id, message.from_user.username, f"Автопоиск: выдан {closest_city}", geo_str)
         await message.answer(f"✅ Найден чат <b>{closest_city}</b>.", reply_markup=kb)
         await state.clear()
-        
-        try:
-            await bot.send_message(
-                chat_id=ALLOWED_GROUP_ID, 
-                message_thread_id=APPROVED_TOPIC_ID, 
-                text=f"🤖 <b>Авто-одобрение по ГЕО (Автопоиск)</b>\n👤 {escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n📍 Выдан: <b>{closest_city}</b>\n🌍 Расстояние: {round(min_dist)} км."
-            )
+        try: await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"🤖 <b>Авто-одобрение по ГЕО (Автопоиск)</b>\n👤 {escape(message.from_user.full_name)} (<code>{message.from_user.id}</code>)\n📍 Выдан: <b>{closest_city}</b>\n🌍 Расстояние: {round(min_dist)} км.")
         except Exception: pass
     else:
         await update_profile(message.from_user.id, message.from_user.username, action=f"Тикет автопоиск (далеко от {closest_city})", geo=geo_str)
@@ -416,18 +413,12 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
     
     chats_info = ""
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('''
-            SELECT o.city_name, s.message_count 
-            FROM stats s 
-            JOIN old_bot_chats o ON s.chat_id = o.chat_id 
-            WHERE s.user_id = ? AND s.message_count > 0
-        ''', (user.id,)) as cursor:
+        async with db.execute('''SELECT o.city_name, s.message_count FROM stats s JOIN old_bot_chats o ON s.chat_id = o.chat_id WHERE s.user_id = ? AND s.message_count > 0''', (user.id,)) as cursor:
             rows = await cursor.fetchall()
             
     if rows:
         chats_info = "\n💬 <b>Активность в чатах:</b>\n"
-        for city_name, count in rows:
-            chats_info += f" ├ {city_name}: {count} сообщ.\n"
+        for city_name, count in rows: chats_info += f" ├ {city_name}: {count} сообщ.\n"
     else:
         chats_info = "\n💬 <b>Активность в чатах:</b> 0 сообщений\n"
         
@@ -446,7 +437,8 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выдать разрешение на чат", callback_data=f"open_app:{user.id}")],
-        [InlineKeyboardButton(text="❌ Отказать", callback_data=f"rej:{user.id}")]
+        [InlineKeyboardButton(text="❌ Отказать", callback_data=f"rej:{user.id}")],
+        [InlineKeyboardButton(text="🔨 Наказание в ЛС", callback_data=f"punish:{user.id}")]
     ])
     try:
         sent_msg = await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=REQUESTS_TOPIC_ID, text=admin_text, reply_markup=kb)
@@ -454,6 +446,74 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
         admin_msg_to_user[sent_msg.message_id] = user.id
     except Exception as e: logging.error(f"Ошибка тикета: {e}")
 
+# --- ПЕРЕХВАТ ВСЕХ ОСТАЛЬНЫХ ЛС ОТ ПОЛЬЗОВАТЕЛЕЙ (Саппорт) ---
+@dp.message(F.chat.type == "private")
+async def catch_all_pms(message: types.Message):
+    await update_profile(message.from_user.id, message.from_user.username, action="Написал в бота (Саппорт)")
+    user_link = f"@{message.from_user.username}" if message.from_user.username else "Без юзернейма"
+    header = f"📩 <b>Новое сообщение</b>\n👤 {escape(message.from_user.full_name)}\n🆔 <code>{message.from_user.id}</code>\n🔗 {user_link}"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔨 Наказание в ЛС", callback_data=f"punish:{message.from_user.id}")]
+    ])
+    try:
+        await bot.send_message(ALLOWED_GROUP_ID, header, message_thread_id=REQUESTS_TOPIC_ID)
+        copied_msg = await message.copy_to(chat_id=ALLOWED_GROUP_ID, message_thread_id=REQUESTS_TOPIC_ID, reply_markup=kb)
+        admin_msg_to_user[copied_msg.message_id] = message.from_user.id
+    except Exception as e: logging.error(f"Ошибка пересылки ЛС: {e}")
+
+# --- МЕНЮ АДМИНА (НАКАЗАНИЯ В ЛС) ---
+@dp.callback_query(F.data.startswith("punish:"))
+async def punish_menu(callback: types.CallbackQuery):
+    user_id = callback.data.split(":")[1]
+    old_kb = callback.message.reply_markup.inline_keyboard
+    new_kb = [row for row in old_kb if row[0].callback_data != callback.data]
+    new_kb.append([
+        InlineKeyboardButton(text="🔇 Мут (ЛС)", callback_data=f"mute_prompt:{user_id}"),
+        InlineKeyboardButton(text="🚫 Бан (ЛС)", callback_data=f"ban_user:{user_id}")
+    ])
+    await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=new_kb))
+
+@dp.callback_query(F.data.startswith("mute_prompt:"))
+async def mute_prompt(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.data.split(":")[1]
+    await state.set_state(AdminFlow.waiting_mute_duration)
+    await state.update_data(mute_user_id=user_id)
+    await callback.message.reply(f"🔇 Напиши количество <b>минут</b> для мута пользователя <code>{user_id}</code> в ЛС бота (только число):")
+    await callback.answer()
+
+@dp.message(AdminFlow.waiting_mute_duration, F.chat.id == ALLOWED_GROUP_ID)
+async def process_mute(message: types.Message, state: FSMContext):
+    if not message.text or not message.text.isdigit():
+        await message.reply("⚠️ Ошибка! Нужно ввести только число (минуты). Операция отменена.")
+        await state.clear()
+        return
+        
+    minutes = int(message.text)
+    data = await state.get_data()
+    target_user = int(data['mute_user_id'])
+    
+    until_date = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('INSERT OR REPLACE INTO blacklist (user_id, until_date) VALUES (?, ?)', (target_user, until_date.isoformat()))
+        await db.commit()
+        
+    await message.reply(f"✅ Пользователь <code>{target_user}</code> успешно <b>замучен в ЛС бота на {minutes} минут</b>.")
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("ban_user:"))
+async def cb_ban_user(callback: types.CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('INSERT OR REPLACE INTO blacklist (user_id, until_date) VALUES (?, NULL)', (user_id,))
+        await db.commit()
+        
+    try: await callback.message.edit_text(f"{callback.message.html_text}\n\n🚫 <b>ЗАБАНЕН АДМИНОМ В ЛС БОТА</b>", reply_markup=None)
+    except Exception: pass
+    await callback.answer("Забанен в боте!")
+
+# --- МЕНЮ АДМИНИСТРАТОРА (ЗАЯВКИ) ---
 @dp.callback_query(F.data.startswith("open_app:"))
 async def open_approve_menu(callback: types.CallbackQuery):
     user_id_str = callback.data.split(":")[1]
@@ -471,7 +531,8 @@ async def close_approve_menu(callback: types.CallbackQuery):
     user_id_str = callback.data.split(":")[1]
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выдать разрешение на чат", callback_data=f"open_app:{user_id_str}")],
-        [InlineKeyboardButton(text="❌ Отказать", callback_data=f"rej:{user_id_str}")]
+        [InlineKeyboardButton(text="❌ Отказать", callback_data=f"rej:{user_id_str}")],
+        [InlineKeyboardButton(text="🔨 Наказание в ЛС", callback_data=f"punish:{user_id_str}")]
     ])
     await callback.message.edit_reply_markup(reply_markup=kb)
 
@@ -479,21 +540,14 @@ async def close_approve_menu(callback: types.CallbackQuery):
 async def admin_approve(callback: types.CallbackQuery):
     _, user_id_str, city_idx_str = callback.data.split(":")
     city_name = list(FLAT_CITIES.keys())[int(city_idx_str)]
-    
     await update_profile(int(user_id_str), None, action=f"Одобрен вручную ({city_name})")
     
-    try:
-        await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"✅ <b>Заявка одобрена ({city_name}):</b>\n{callback.message.html_text}")
+    try: await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"✅ <b>Заявка одобрена ({city_name}):</b>\n{callback.message.html_text}")
     except Exception: pass
-        
-    try:
-        await callback.message.delete()
+    try: await callback.message.delete()
     except Exception: pass
-        
-    try:
-        await bot.send_message(chat_id=int(user_id_str), text=f"🎉 Админ выдал чат <b>{city_name}</b>!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти ({city_name})", url=FLAT_CITIES[city_name]["link"])]]))
+    try: await bot.send_message(chat_id=int(user_id_str), text=f"🎉 Админ выдал чат <b>{city_name}</b>!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Войти ({city_name})", url=FLAT_CITIES[city_name]["link"])]]))
     except Exception: pass
-            
     await callback.answer("Выдано!")
 
 @dp.callback_query(F.data.startswith("rej:"))
@@ -501,31 +555,112 @@ async def admin_reject(callback: types.CallbackQuery):
     _, user_id_str = callback.data.split(":")
     await update_profile(int(user_id_str), None, action="Отказано админом")
     
-    try:
-        await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"❌ <b>Заявка отклонена:</b>\n{callback.message.html_text}")
+    try: await bot.send_message(chat_id=ALLOWED_GROUP_ID, message_thread_id=APPROVED_TOPIC_ID, text=f"❌ <b>Заявка отклонена:</b>\n{callback.message.html_text}")
     except Exception: pass
-
-    try:
-        await callback.message.delete()
+    try: await callback.message.delete()
     except Exception: pass
-        
-    try: 
-        await bot.send_message(chat_id=int(user_id_str), text="😔 Отказано в подборе чата.")
+    try: await bot.send_message(chat_id=int(user_id_str), text="😔 Отказано в подборе чата.")
     except Exception: pass
-        
     await callback.answer("Отклонено!")
 
+# --- ОТВЕТ ОТ АДМИНОВ ЮЗЕРАМ (ИДЕАЛЬНОЕ КОПИРОВАНИЕ ФОРМАТА И МЕДИА) ---
 @dp.message(F.chat.id == ALLOWED_GROUP_ID, F.reply_to_message)
 async def reply_from_group(message: types.Message):
-    target_user_id = admin_msg_to_user.get(message.reply_to_message.message_id)
-    if target_user_id and message.text:
-        try: await bot.send_message(target_user_id, f"📩 <b>От админа:</b>\n{escape(message.text)}")
-        except Exception: pass
+    if message.text and message.text.startswith("/"): return
+    if message.caption and message.caption.startswith("/"): return
 
+    target_user_id = admin_msg_to_user.get(message.reply_to_message.message_id)
+    if target_user_id:
+        try: 
+            await message.copy_to(chat_id=target_user_id)
+            await message.reply("✅ Ответ переслан пользователю!")
+        except Exception as e: 
+            await message.reply(f"❌ Ошибка отправки (возможно, юзер заблокировал бота): {e}")
+
+# --- КОМАНДЫ БАНА И РАЗБАНА ДЛЯ ЛС БОТА ---
+@dp.message(Command("ban"), F.chat.id == ALLOWED_GROUP_ID)
+async def cmd_ban(message: types.Message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("⚠️ Использование: <code>/ban @username</code> или <code>/ban ID</code>")
+        return
+        
+    target = args[1].replace("@", "")
+    async with aiosqlite.connect(DB_NAME) as db:
+        if target.isdigit(): user_id = int(target)
+        else:
+            async with db.execute('SELECT user_id FROM user_profiles WHERE username = ? OR username = ?', (target, f"@{target}")) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    await message.reply("❌ Пользователь с таким юзернеймом не найден в базе бота.")
+                    return
+                user_id = row[0]
+        
+        await db.execute('INSERT OR REPLACE INTO blacklist (user_id, until_date) VALUES (?, NULL)', (user_id,))
+        await db.commit()
+    await message.reply(f"✅ Пользователь <code>{user_id}</code> навсегда забанен в ЛС бота.")
+
+@dp.message(Command("unban"), F.chat.id == ALLOWED_GROUP_ID)
+async def cmd_unban(message: types.Message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("⚠️ Использование: <code>/unban @username</code> или <code>/unban ID</code>")
+        return
+        
+    target = args[1].replace("@", "")
+    async with aiosqlite.connect(DB_NAME) as db:
+        if target.isdigit(): user_id = int(target)
+        else:
+            async with db.execute('SELECT user_id FROM user_profiles WHERE username = ? OR username = ?', (target, f"@{target}")) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    await message.reply("❌ Пользователь не найден в базе бота.")
+                    return
+                user_id = row[0]
+        
+        await db.execute('DELETE FROM blacklist WHERE user_id = ?', (user_id,))
+        await db.commit()
+    await message.reply(f"✅ Пользователь <code>{user_id}</code> удален из черного списка ЛС бота.")
+
+# --- КОМАНДА /MUT ВНУТРИ ГОРОДСКИХ ЧАТОВ ---
+@dp.message(Command("mut"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_mut_in_chat(message: types.Message):
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if member.status not in ['administrator', 'creator'] and message.from_user.id != ADMIN_ID: return
+    
+    args = message.text.split()
+    target_id = None
+    minutes = 0
+    
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        if len(args) > 1 and args[1].isdigit(): minutes = int(args[1])
+        else:
+            await message.reply("⚠️ Укажи время мута. Пример: <code>/mut 60</code> (в реплай)")
+            return
+    elif len(args) >= 3:
+        target_name = args[1].replace("@", "")
+        if args[2].isdigit(): minutes = int(args[2])
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute('SELECT user_id FROM user_profiles WHERE username = ? OR username = ?', (target_name, f"@{target_name}")) as cursor:
+                row = await cursor.fetchone()
+                if row: target_id = row[0]
+    
+    if not target_id:
+        await message.reply("⚠️ Пользователь не найден. Ответь на его сообщение или используй формат <code>/mut @username 60</code>")
+        return
+        
+    until_date = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+    try:
+        await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target_id, permissions=types.ChatPermissions(can_send_messages=False), until_date=until_date)
+        await message.reply(f"🔇 Пользователь ограничен в этом чате на {minutes} минут.")
+    except Exception as e:
+        await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
+
+# --- ОСТАЛЬНЫЕ КОМАНДЫ (SETPHRASE, TOP, CALL, STATS) ---
 @dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
 async def set_new_phrase(message: types.Message):
     global current_ping
-    
     target = message.reply_to_message or message
     text_html = target.html_text or ""
     
@@ -535,16 +670,11 @@ async def set_new_phrase(message: types.Message):
         if cmd_prefix and text_html.startswith(cmd_prefix):
             text_html = text_html.replace(cmd_prefix, "", 1).strip()
             
-    if target.photo:
-        current_ping = {"type": "photo", "file_id": target.photo[-1].file_id, "text": text_html}
-    elif target.video:
-        current_ping = {"type": "video", "file_id": target.video.file_id, "text": text_html}
-    elif target.audio:
-        current_ping = {"type": "audio", "file_id": target.audio.file_id, "text": text_html}
-    elif target.voice:
-        current_ping = {"type": "voice", "file_id": target.voice.file_id, "text": text_html}
-    elif target.animation:
-        current_ping = {"type": "animation", "file_id": target.animation.file_id, "text": text_html}
+    if target.photo: current_ping = {"type": "photo", "file_id": target.photo[-1].file_id, "text": text_html}
+    elif target.video: current_ping = {"type": "video", "file_id": target.video.file_id, "text": text_html}
+    elif target.audio: current_ping = {"type": "audio", "file_id": target.audio.file_id, "text": text_html}
+    elif target.voice: current_ping = {"type": "voice", "file_id": target.voice.file_id, "text": text_html}
+    elif target.animation: current_ping = {"type": "animation", "file_id": target.animation.file_id, "text": text_html}
     else:
         if not text_html:
             await message.reply("⚠️ Ошибка! Напиши текст после команды или сделай реплай на нужное сообщение (текст/фото/видео).")
@@ -556,8 +686,7 @@ async def set_new_phrase(message: types.Message):
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_top(message: types.Message):
     chat_id = message.chat.id
-    if chat_id != ALLOWED_GROUP_ID and chat_id not in allowed_chats and chat_id not in IGNORED_CHATS: 
-        return
+    if chat_id != ALLOWED_GROUP_ID and chat_id not in allowed_chats and chat_id not in IGNORED_CHATS: return
     await send_top_page(message, page=0)
 
 async def send_top_page(message_or_call, page):
@@ -584,13 +713,10 @@ async def send_top_page(message_or_call, page):
     buttons = []
     if page > 0: buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"top_page:{page-1}"))
     if offset + limit < total_users: buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"top_page:{page+1}"))
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
     
-    if isinstance(message_or_call, types.Message):
-        await message_or_call.answer(text, reply_markup=kb)
-    else:
-        await message_or_call.message.edit_text(text, reply_markup=kb)
+    if isinstance(message_or_call, types.Message): await message_or_call.answer(text, reply_markup=kb)
+    else: await message_or_call.message.edit_text(text, reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("top_page:"))
 async def paginate_top(callback: types.CallbackQuery):
@@ -601,8 +727,7 @@ async def paginate_top(callback: types.CallbackQuery):
 @dp.message(Command("call"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_call(message: types.Message):
     chat_id = message.chat.id
-    if chat_id != ALLOWED_GROUP_ID and chat_id not in allowed_chats and chat_id not in IGNORED_CHATS: 
-        return
+    if chat_id != ALLOWED_GROUP_ID and chat_id not in allowed_chats and chat_id not in IGNORED_CHATS: return
         
     member = await bot.get_chat_member(chat_id, message.from_user.id)
     if member.status not in ['administrator', 'creator']: return
@@ -623,34 +748,23 @@ async def cmd_call(message: types.Message):
     
     for chunk in user_chunks:
         mentions = " ".join([f'<a href="tg://user?id={uid}">@{escape(str(name))}</a>' for uid, name in chunk])
-        
         parts_to_join = []
         if admin_text: parts_to_join.append(admin_text)
         parts_to_join.append(mentions)
         if current_ping["text"]: parts_to_join.append(current_ping["text"])
-        
         final_text = "\n".join(parts_to_join)
         
         try:
             m_type = current_ping["type"]
             f_id = current_ping["file_id"]
-            
-            if m_type == "text":
-                await message.reply(final_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
-            elif m_type == "photo":
-                await message.reply_photo(photo=f_id, caption=final_text)
-            elif m_type == "video":
-                await message.reply_video(video=f_id, caption=final_text)
-            elif m_type == "audio":
-                await message.reply_audio(audio=f_id, caption=final_text)
-            elif m_type == "voice":
-                await message.reply_voice(voice=f_id, caption=final_text)
-            elif m_type == "animation":
-                await message.reply_animation(animation=f_id, caption=final_text)
-                
+            if m_type == "text": await message.reply(final_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+            elif m_type == "photo": await message.reply_photo(photo=f_id, caption=final_text)
+            elif m_type == "video": await message.reply_video(video=f_id, caption=final_text)
+            elif m_type == "audio": await message.reply_audio(audio=f_id, caption=final_text)
+            elif m_type == "voice": await message.reply_voice(voice=f_id, caption=final_text)
+            elif m_type == "animation": await message.reply_animation(animation=f_id, caption=final_text)
             await asyncio.sleep(1)
-        except Exception as e: 
-            logging.error(f"Ошибка калла: {e}")
+        except Exception as e: logging.error(f"Ошибка калла: {e}")
 
 @dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_backup(message: types.Message):
@@ -666,25 +780,19 @@ async def collect_stats(message: types.Message):
             
     await update_profile(message.from_user.id, message.from_user.username, chat_msg=True, chat_name=matched_city)
     
-    text = message.text or message.caption or ""
-    if len(text) > 5:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count) VALUES (?, ?, ?, 1)
-                                ON CONFLICT(user_id, chat_id) DO UPDATE SET message_count = message_count + 1, user_name = excluded.user_name''', 
-                                (message.from_user.id, message.chat.id, message.from_user.full_name))
-            await db.commit()
+    # Теперь бот сохраняет юзера в базу даже после 1 короткого сообщения, чтобы быстрее собирать списки для калла
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count) VALUES (?, ?, ?, 1)
+                            ON CONFLICT(user_id, chat_id) DO UPDATE SET message_count = message_count + 1, user_name = excluded.user_name''', 
+                            (message.from_user.id, message.chat.id, message.from_user.full_name))
+        await db.commit()
 
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
-    
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
-    
-    await bot.set_my_commands([
-        BotCommand(command="top", description="Топ-42 активных участников")
-    ], scope=BotCommandScopeAllGroupChats())
-    
+    await bot.set_my_commands([BotCommand(command="top", description="Топ-42 активных участников")], scope=BotCommandScopeAllGroupChats())
     await auto_fetch_chats()
     await dp.start_polling(bot)
 
