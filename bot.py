@@ -4,6 +4,7 @@ import datetime
 import aiosqlite
 import csv
 import os
+import json
 from html import escape
 
 from aiogram import Bot, Dispatcher, types, F
@@ -112,9 +113,7 @@ async def init_db():
                             last_action TEXT, 
                             geo TEXT, 
                             chat_name TEXT)''')
-        # Обновленная таблица черного списка (с датой окончания мута)
         await db.execute('''CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY, until_date TEXT)''')
-        # Пытаемся добавить колонку, если база старая
         try: await db.execute('ALTER TABLE blacklist ADD COLUMN until_date TEXT')
         except Exception: pass
         await db.commit()
@@ -129,15 +128,10 @@ async def update_profile(user_id, username, pm_start=False, chat_msg=False, acti
         await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', (user_id, username_safe))
         await db.execute('UPDATE user_profiles SET username = ? WHERE user_id = ?', (username_safe, user_id))
         
-        if pm_start:
-            await db.execute('UPDATE user_profiles SET first_pm_date = COALESCE(first_pm_date, ?) WHERE user_id = ?', (now, user_id))
-        if chat_msg:
-            await db.execute('UPDATE user_profiles SET first_chat_date = COALESCE(first_chat_date, ?) WHERE user_id = ?', (now, user_id))
-        if action:
-            await db.execute('UPDATE user_profiles SET last_action = ? WHERE user_id = ?', (action, user_id))
-        if geo:
-            await db.execute('UPDATE user_profiles SET geo = ? WHERE user_id = ?', (geo, user_id))
-            
+        if pm_start: await db.execute('UPDATE user_profiles SET first_pm_date = COALESCE(first_pm_date, ?) WHERE user_id = ?', (now, user_id))
+        if chat_msg: await db.execute('UPDATE user_profiles SET first_chat_date = COALESCE(first_chat_date, ?) WHERE user_id = ?', (now, user_id))
+        if action: await db.execute('UPDATE user_profiles SET last_action = ? WHERE user_id = ?', (action, user_id))
+        if geo: await db.execute('UPDATE user_profiles SET geo = ? WHERE user_id = ?', (geo, user_id))
         await db.commit()
 
 async def auto_fetch_chats():
@@ -180,21 +174,16 @@ async def send_auto_backup(bot: Bot, trigger_text: str):
                         
                         row = [uid, uname_safe, u[2], u[3], u[4], u[5], stats_str]
                         for city in cities_list: row.append(stats_dict.get(city, 0))
-                            
                         writer.writerow(row)
                         
         await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 <b>Авто-бэкап:</b> {trigger_text}")
         await bot.send_document(chat_id=ADMIN_ID, document=FSInputFile(prof_file))
         if os.path.exists(DB_NAME): await bot.send_document(chat_id=ADMIN_ID, document=FSInputFile(DB_NAME))
         if os.path.exists(LOG_FILE): await bot.send_document(chat_id=ADMIN_ID, document=FSInputFile(LOG_FILE))
-    except Exception as e:
-        logging.error(f"Ошибка авто-бэкапа: {e}")
+    except Exception as e: logging.error(f"Ошибка авто-бэкапа: {e}")
 
-async def on_startup(bot: Bot):
-    logging.info("🟢 Бот запущен")
-
-async def on_shutdown(bot: Bot):
-    await send_auto_backup(bot, "🔴 Выключение/Обновление бота (Сохрани этот бэкап!)")
+async def on_startup(bot: Bot): logging.info("🟢 Бот запущен")
+async def on_shutdown(bot: Bot): await send_auto_backup(bot, "🔴 Выключение/Обновление бота")
 
 class UserFlow(StatesGroup):
     waiting_auto_geo = State()
@@ -210,23 +199,19 @@ admin_msg_to_user = {}
 
 @dp.message.middleware()
 async def global_middleware(handler, event: types.Message, data):
-    # 1. Мут/Бан работает ТОЛЬКО в ЛС (private)
     if event.chat.type == "private":
         async with aiosqlite.connect(DB_NAME) as db:
             async with db.execute('SELECT until_date FROM blacklist WHERE user_id = ?', (event.from_user.id,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    if row[0] is None:
-                        return # Пермабан в ЛС
+                    if row[0] is None: return 
                     else:
                         until_date = datetime.datetime.fromisoformat(row[0])
-                        if datetime.datetime.now() < until_date:
-                            return # Всё ещё в муте в ЛС
+                        if datetime.datetime.now() < until_date: return 
                         else:
                             await db.execute('DELETE FROM blacklist WHERE user_id = ?', (event.from_user.id,))
                             await db.commit()
                             
-    # 2. Тихое добавление новых чатов в базу
     if event.chat.type in ["group", "supergroup"]:
         chat_id = event.chat.id
         if chat_id != ALLOWED_GROUP_ID and chat_id not in IGNORED_CHATS:
@@ -242,9 +227,17 @@ async def global_middleware(handler, event: types.Message, data):
                     await db.commit()
     return await handler(event, data)
 
+# --- УЗНАТЬ ID ЧАТА ДЛЯ ИМПОРТА ---
+@dp.message(Command("chatid"))
+async def cmd_chatid(message: types.Message):
+    await message.reply(f"ID этого чата: <code>{message.chat.id}</code>\n<i>Скопируй его и напиши в описании к файлу result.json в личку боту.</i>")
+
+# --- ОБРАБОТКА ФАЙЛОВ ОТ АДМИНА (БЭКАПЫ И JSON ТЕЛЕГРАМА) ---
 @dp.message(F.chat.type == "private", F.from_user.id == ADMIN_ID, F.document)
-async def restore_database(message: types.Message):
+async def handle_admin_files(message: types.Message):
     doc_name = message.document.file_name
+    
+    # Восстановление базы
     if doc_name in [DB_NAME, LOG_FILE]:
         await message.reply(f"⏳ Скачиваю файл <b>{doc_name}</b>...")
         file = await bot.get_file(message.document.file_id)
@@ -253,6 +246,55 @@ async def restore_database(message: types.Message):
             await init_db()
             await auto_fetch_chats()
         await message.reply(f"✅ Файл <b>{doc_name}</b> успешно восстановлен! Бот готов к работе.")
+
+    # Импорт JSON из Telegram Desktop
+    elif doc_name.endswith(".json"):
+        args = message.caption.split() if message.caption else []
+        if not args or not (args[0].lstrip('-').isdigit()):
+            await message.reply("⚠️ Ошибка! Скинь файл выгрузки `result.json` и в **описании (caption)** к файлу напиши ID чата (например: `-1001234567890`).\n\n<i>Узнать ID можно командой /chatid в нужной группе.</i>")
+            return
+
+        chat_id = int(args[0])
+        await message.reply(f"⏳ Читаю выгрузку Telegram (JSON) и собираю пользователей для чата <code>{chat_id}</code>...")
+        
+        file = await bot.get_file(message.document.file_id)
+        await bot.download_file(file.file_path, destination="temp_export.json")
+        
+        try:
+            with open("temp_export.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                
+            users_to_add = {}
+            for msg in data.get("messages", []):
+                # Ищем только сообщения от реальных людей
+                if msg.get("type") == "message" and "from_id" in msg and "from" in msg:
+                    uid_str = str(msg["from_id"])
+                    # В выгрузке телеги ID начинаются с "user" (например: user123456)
+                    if uid_str.startswith("user"):
+                        uid = int(uid_str.replace("user", ""))
+                        uname = msg["from"]
+                        users_to_add[uid] = uname
+                        
+            if not users_to_add:
+                await message.reply("⚠️ В файле не найдено ни одного сообщения от пользователей. Убедись, что это правильная выгрузка истории чата.")
+                return
+
+            async with aiosqlite.connect(DB_NAME) as db:
+                for uid, uname in users_to_add.items():
+                    await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count) 
+                                        VALUES (?, ?, ?, 1)
+                                        ON CONFLICT(user_id, chat_id) DO NOTHING''', 
+                                        (uid, chat_id, uname))
+                    await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', 
+                                     (uid, uname))
+                await db.commit()
+                
+            await message.reply(f"✅ Успешно извлечено и добавлено <b>{len(users_to_add)}</b> уникальных пользователей!\nОни уже готовы к призыву в калле.")
+        except Exception as e:
+            await message.reply(f"❌ Ошибка при чтении файла JSON: {e}")
+        finally:
+            if os.path.exists("temp_export.json"):
+                os.remove("temp_export.json")
 
 @dp.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -292,11 +334,9 @@ async def global_stats(message: types.Message):
             total_personal = row[0] if row and row[0] else 0
 
     text = "🌍 <b>Глобальный рейтинг городов:</b>\n\n"
-    if not rows: 
-        text += "Пока нет данных о статистике.\n"
+    if not rows: text += "Пока нет данных о статистике.\n"
     else:
-        for i, (city, total) in enumerate(rows, 1): 
-            text += f"{i}. <b>{city}</b> — {total} сообщ.\n"
+        for i, (city, total) in enumerate(rows, 1): text += f"{i}. <b>{city}</b> — {total} сообщ.\n"
     
     text += f"\n💬 <b>Твои сообщения во всех чатах:</b> {total_personal}"
     await message.answer(text)
@@ -395,15 +435,12 @@ async def process_manual_ticket(message: types.Message, state: FSMContext):
     lat = message.location.latitude if message.location else None
     lon = message.location.longitude if message.location else None
     geo_str = f"{lat}, {lon}" if lat else None
-    
     data = await state.get_data()
     target_city = data.get("chosen_city")
     
     await update_profile(message.from_user.id, message.from_user.username, action="Тикет (ручная заявка без гео)", geo=geo_str)
     await log_to_sheets(message.from_user.id, message.from_user.username, "Тикет (ручная заявка)")
-    
     await send_ticket_to_admins(message.from_user, lat, lon, note="Запрос на добавление / проблемы с гео", target_city=target_city)
-    
     await message.answer("Запрос зафиксирован, администрация скоро к вам обратится.", reply_markup=ReplyKeyboardRemove())
     await state.set_state(UserFlow.waiting_admin_response)
 
@@ -419,21 +456,10 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
     if rows:
         chats_info = "\n💬 <b>Активность в чатах:</b>\n"
         for city_name, count in rows: chats_info += f" ├ {city_name}: {count} сообщ.\n"
-    else:
-        chats_info = "\n💬 <b>Активность в чатах:</b> 0 сообщений\n"
+    else: chats_info = "\n💬 <b>Активность в чатах:</b> 0 сообщений\n"
         
     applied_text = f"\n🎯 <b>Подавал заявку в:</b> {target_city}" if target_city else "\n🎯 <b>Подавал заявку в:</b> Город/Страна не из списка"
-
-    admin_text = (
-        f"🚨 <b>Новый тикет!</b>\n"
-        f"👤 {escape(user.full_name)}\n"
-        f"🆔 <code>{user.id}</code>\n"
-        f"🔗 {username}\n"
-        f"🌍 {geo_text}"
-        f"{applied_text}"
-        f"{chats_info}"
-        f"\n📝 <i>{note}</i>"
-    )
+    admin_text = f"🚨 <b>Новый тикет!</b>\n👤 {escape(user.full_name)}\n🆔 <code>{user.id}</code>\n🔗 {username}\n🌍 {geo_text}{applied_text}{chats_info}\n📝 <i>{note}</i>"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выдать разрешение на чат", callback_data=f"open_app:{user.id}")],
@@ -446,23 +472,19 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
         admin_msg_to_user[sent_msg.message_id] = user.id
     except Exception as e: logging.error(f"Ошибка тикета: {e}")
 
-# --- ПЕРЕХВАТ ВСЕХ ОСТАЛЬНЫХ ЛС ОТ ПОЛЬЗОВАТЕЛЕЙ (Саппорт) ---
 @dp.message(F.chat.type == "private")
 async def catch_all_pms(message: types.Message):
     await update_profile(message.from_user.id, message.from_user.username, action="Написал в бота (Саппорт)")
     user_link = f"@{message.from_user.username}" if message.from_user.username else "Без юзернейма"
     header = f"📩 <b>Новое сообщение</b>\n👤 {escape(message.from_user.full_name)}\n🆔 <code>{message.from_user.id}</code>\n🔗 {user_link}"
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔨 Наказание в ЛС", callback_data=f"punish:{message.from_user.id}")]
-    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔨 Наказание в ЛС", callback_data=f"punish:{message.from_user.id}")]])
     try:
         await bot.send_message(ALLOWED_GROUP_ID, header, message_thread_id=REQUESTS_TOPIC_ID)
         copied_msg = await message.copy_to(chat_id=ALLOWED_GROUP_ID, message_thread_id=REQUESTS_TOPIC_ID, reply_markup=kb)
         admin_msg_to_user[copied_msg.message_id] = message.from_user.id
     except Exception as e: logging.error(f"Ошибка пересылки ЛС: {e}")
 
-# --- МЕНЮ АДМИНА (НАКАЗАНИЯ В ЛС) ---
 @dp.callback_query(F.data.startswith("punish:"))
 async def punish_menu(callback: types.CallbackQuery):
     user_id = callback.data.split(":")[1]
@@ -492,7 +514,6 @@ async def process_mute(message: types.Message, state: FSMContext):
     minutes = int(message.text)
     data = await state.get_data()
     target_user = int(data['mute_user_id'])
-    
     until_date = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
     
     async with aiosqlite.connect(DB_NAME) as db:
@@ -508,12 +529,10 @@ async def cb_ban_user(callback: types.CallbackQuery):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('INSERT OR REPLACE INTO blacklist (user_id, until_date) VALUES (?, NULL)', (user_id,))
         await db.commit()
-        
     try: await callback.message.edit_text(f"{callback.message.html_text}\n\n🚫 <b>ЗАБАНЕН АДМИНОМ В ЛС БОТА</b>", reply_markup=None)
     except Exception: pass
     await callback.answer("Забанен в боте!")
 
-# --- МЕНЮ АДМИНИСТРАТОРА (ЗАЯВКИ) ---
 @dp.callback_query(F.data.startswith("open_app:"))
 async def open_approve_menu(callback: types.CallbackQuery):
     user_id_str = callback.data.split(":")[1]
@@ -563,7 +582,6 @@ async def admin_reject(callback: types.CallbackQuery):
     except Exception: pass
     await callback.answer("Отклонено!")
 
-# --- ОТВЕТ ОТ АДМИНОВ ЮЗЕРАМ (ИДЕАЛЬНОЕ КОПИРОВАНИЕ ФОРМАТА И МЕДИА) ---
 @dp.message(F.chat.id == ALLOWED_GROUP_ID, F.reply_to_message)
 async def reply_from_group(message: types.Message):
     if message.text and message.text.startswith("/"): return
@@ -574,10 +592,8 @@ async def reply_from_group(message: types.Message):
         try: 
             await message.copy_to(chat_id=target_user_id)
             await message.reply("✅ Ответ переслан пользователю!")
-        except Exception as e: 
-            await message.reply(f"❌ Ошибка отправки (возможно, юзер заблокировал бота): {e}")
+        except Exception as e: await message.reply(f"❌ Ошибка отправки (возможно, юзер заблокировал бота): {e}")
 
-# --- КОМАНДЫ БАНА И РАЗБАНА ДЛЯ ЛС БОТА ---
 @dp.message(Command("ban"), F.chat.id == ALLOWED_GROUP_ID)
 async def cmd_ban(message: types.Message):
     args = message.text.split()
@@ -595,7 +611,6 @@ async def cmd_ban(message: types.Message):
                     await message.reply("❌ Пользователь с таким юзернеймом не найден в базе бота.")
                     return
                 user_id = row[0]
-        
         await db.execute('INSERT OR REPLACE INTO blacklist (user_id, until_date) VALUES (?, NULL)', (user_id,))
         await db.commit()
     await message.reply(f"✅ Пользователь <code>{user_id}</code> навсегда забанен в ЛС бота.")
@@ -617,12 +632,10 @@ async def cmd_unban(message: types.Message):
                     await message.reply("❌ Пользователь не найден в базе бота.")
                     return
                 user_id = row[0]
-        
         await db.execute('DELETE FROM blacklist WHERE user_id = ?', (user_id,))
         await db.commit()
     await message.reply(f"✅ Пользователь <code>{user_id}</code> удален из черного списка ЛС бота.")
 
-# --- КОМАНДА /MUT ВНУТРИ ГОРОДСКИХ ЧАТОВ ---
 @dp.message(Command("mut"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_mut_in_chat(message: types.Message):
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
@@ -654,10 +667,8 @@ async def cmd_mut_in_chat(message: types.Message):
     try:
         await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target_id, permissions=types.ChatPermissions(can_send_messages=False), until_date=until_date)
         await message.reply(f"🔇 Пользователь ограничен в этом чате на {minutes} минут.")
-    except Exception as e:
-        await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
+    except Exception as e: await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
 
-# --- ОСТАЛЬНЫЕ КОМАНДЫ (SETPHRASE, TOP, CALL, STATS) ---
 @dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
 async def set_new_phrase(message: types.Message):
     global current_ping
@@ -780,7 +791,6 @@ async def collect_stats(message: types.Message):
             
     await update_profile(message.from_user.id, message.from_user.username, chat_msg=True, chat_name=matched_city)
     
-    # Теперь бот сохраняет юзера в базу даже после 1 короткого сообщения, чтобы быстрее собирать списки для калла
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count) VALUES (?, ?, ?, 1)
                             ON CONFLICT(user_id, chat_id) DO UPDATE SET message_count = message_count + 1, user_name = excluded.user_name''', 
