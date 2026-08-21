@@ -33,7 +33,6 @@ ADMIN_ID = 2103317502
 REQUESTS_TOPIC_ID = 46 
 APPROVED_TOPIC_ID = 42 
 
-# Стартовый список игнорируемых чатов (пополняется из БД)
 IGNORED_CHATS = {-1003923209265}
 
 DB_NAME = "database.db"
@@ -45,6 +44,7 @@ current_ping = {
     "text": "ПЯТЁРКА ПХ ПОБЕДА" 
 }
 
+# Хардкодная база (останется как основа, новые города будут добавляться сюда динамически)
 DATABASE = {
     "Россия": {
         "Москва": {"coords": (55.7558, 37.6173), "link": "https://t.me/bratyxi42msk"},
@@ -119,28 +119,45 @@ async def init_db():
         try: await db.execute('ALTER TABLE blacklist ADD COLUMN until_date TEXT')
         except Exception: pass
         
-        # Настройки калла
         await db.execute('''CREATE TABLE IF NOT EXISTS ping_settings (
                             id INTEGER PRIMARY KEY, type TEXT, file_id TEXT, text TEXT)''')
         await db.execute('''INSERT OR IGNORE INTO ping_settings (id, type, file_id, text) 
                             VALUES (1, 'text', NULL, 'ПЯТЁРКА ПХ ПОБЕДА')''')
         
-        # Таблица секретных чатов
         await db.execute('''CREATE TABLE IF NOT EXISTS secret_chats (chat_id INTEGER PRIMARY KEY)''')
+        
+        # --- ТАБЛИЦА ДИНАМИЧЕСКИХ ГОРОДОВ ---
+        await db.execute('''CREATE TABLE IF NOT EXISTS dynamic_cities (
+                            chat_id INTEGER PRIMARY KEY, country TEXT, city_name TEXT, link TEXT, lat REAL, lon REAL)''')
+                            
         await db.commit()
         
+        # Подгружаем разрешенные чаты
         async with db.execute('SELECT chat_id FROM old_bot_chats') as cursor:
             async for row in cursor: allowed_chats.add(row[0])
             
+        # Подгружаем секретные чаты
         async with db.execute('SELECT chat_id FROM secret_chats') as cursor:
             async for row in cursor: IGNORED_CHATS.add(row[0])
             
+        # Подгружаем фразу калла
         async with db.execute('SELECT type, file_id, text FROM ping_settings WHERE id = 1') as cursor:
             row = await cursor.fetchone()
             if row:
                 current_ping["type"] = row[0]
                 current_ping["file_id"] = row[1]
                 current_ping["text"] = row[2] if row[2] is not None else ""
+                
+        # --- ПОДГРУЖАЕМ ДИНАМИЧЕСКИЕ ГОРОДА В КНОПКИ И ГЕО ---
+        async with db.execute('SELECT chat_id, country, city_name, link, lat, lon FROM dynamic_cities') as cursor:
+            async for row in cursor:
+                cid, country, city, link, lat, lon = row
+                if country not in DATABASE: DATABASE[country] = {}
+                DATABASE[country][city] = {"coords": (lat, lon), "link": link}
+                FLAT_CITIES[city] = {"coords": (lat, lon), "link": link}
+                if "t.me/" in link and "+" not in link:
+                    uname = "@" + link.split("t.me/")[1]
+                    if uname not in CHAT_USERNAMES: CHAT_USERNAMES.append(uname)
 
 async def update_profile(user_id, username, pm_start=False, chat_msg=False, action=None, geo=None, chat_name=None):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -215,6 +232,11 @@ class UserFlow(StatesGroup):
 class AdminFlow(StatesGroup):
     waiting_mute_duration = State()
 
+class AdminAddChat(StatesGroup):
+    waiting_country = State()
+    waiting_link = State()
+    waiting_coords = State()
+
 user_to_admin_msg = {}
 admin_msg_to_user = {}
 
@@ -252,36 +274,80 @@ async def global_middleware(handler, event: types.Message, data):
 async def cmd_chatid(message: types.Message):
     await message.reply(f"ID этого чата: <code>{message.chat.id}</code>")
 
-# --- КОМАНДЫ ДЛЯ РУЧНОГО УПРАВЛЕНИЯ ЧАТАМИ ---
+# --- КОМАНДЫ ДЛЯ РУЧНОГО УПРАВЛЕНИЯ ЧАТАМИ И ГОРОДАМИ ---
 @dp.message(Command("addchat"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
-async def cmd_addchat(message: types.Message):
+async def cmd_addchat_start(message: types.Message, state: FSMContext):
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.reply("⚠️ Использование: <code>/addchat <ID_чата> <Название></code>\nНапример: <code>/addchat -1001234567890 Гараж 42</code>")
+        await message.reply("⚠️ Использование: <code>/addchat <ID_чата> <Название города></code>\nНапример: <code>/addchat -1001234567890 Сочи</code>")
         return
     
     chat_id_str = args[1]
     city_name = args[2]
     
     if not chat_id_str.lstrip('-').isdigit():
-        await message.reply("❌ Неверный ID чата.")
+        await message.reply("❌ Неверный ID чата. Он должен состоять из цифр (обычно с минусом).")
         return
         
     chat_id = int(chat_id_str)
     
+    await state.update_data(new_chat_id=chat_id, new_city_name=city_name)
+    await state.set_state(AdminAddChat.waiting_country)
+    await message.reply(f"🏙 Город: <b>{city_name}</b>\n\n🌍 <b>Шаг 1/3:</b> Отправь название страны (например: <code>Россия</code>, <code>Беларусь</code>):", reply_markup=ReplyKeyboardRemove())
+
+@dp.message(AdminAddChat.waiting_country, F.chat.type == "private", F.from_user.id == ADMIN_ID)
+async def cmd_addchat_country(message: types.Message, state: FSMContext):
+    await state.update_data(new_country=message.text.strip())
+    await state.set_state(AdminAddChat.waiting_link)
+    await message.reply("🔗 <b>Шаг 2/3:</b> Отправь ссылку-приглашение на этот чат (например: <code>https://t.me/...</code>):")
+
+@dp.message(AdminAddChat.waiting_link, F.chat.type == "private", F.from_user.id == ADMIN_ID)
+async def cmd_addchat_link(message: types.Message, state: FSMContext):
+    await state.update_data(new_link=message.text.strip())
+    await state.set_state(AdminAddChat.waiting_coords)
+    await message.reply("📍 <b>Шаг 3/3:</b> Теперь отправь координаты города.\nМожешь скинуть их через запятую (например: <code>43.5855, 39.7231</code>) или просто прикрепи <b>геопозицию</b> с карты Телеграма:")
+
+@dp.message(AdminAddChat.waiting_coords, F.chat.type == "private", F.from_user.id == ADMIN_ID)
+async def cmd_addchat_coords(message: types.Message, state: FSMContext):
+    lat, lon = None, None
+    if message.location:
+        lat = message.location.latitude
+        lon = message.location.longitude
+    else:
+        try:
+            parts = message.text.replace(' ', '').split(',')
+            lat = float(parts[0])
+            lon = float(parts[1])
+        except:
+            await message.reply("❌ Ошибка формата. Отправь две цифры через запятую или скинь точку на карте (Геопозицию).")
+            return
+            
+    data = await state.get_data()
+    chat_id = data['new_chat_id']
+    city_name = data['new_city_name']
+    country = data['new_country']
+    link = data['new_link']
+    
+    # Обновляем оперативную память бота
+    if country not in DATABASE: DATABASE[country] = {}
+    DATABASE[country][city_name] = {"coords": (lat, lon), "link": link}
+    FLAT_CITIES[city_name] = {"coords": (lat, lon), "link": link}
+    if "t.me/" in link and "+" not in link:
+        uname = "@" + link.split("t.me/")[1]
+        if uname not in CHAT_USERNAMES: CHAT_USERNAMES.append(uname)
+        
+    # Записываем в базу данных
     async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('INSERT OR REPLACE INTO dynamic_cities (chat_id, country, city_name, link, lat, lon) VALUES (?, ?, ?, ?, ?, ?)', (chat_id, country, city_name, link, lat, lon))
         await db.execute('INSERT INTO old_bot_chats (chat_id, city_name) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET city_name=excluded.city_name', (chat_id, city_name))
+        await db.execute('DELETE FROM secret_chats WHERE chat_id = ?', (chat_id,))
         await db.commit()
         
     allowed_chats.add(chat_id)
-    # Если чат был в секретных, убираем
-    if chat_id in IGNORED_CHATS:
-        IGNORED_CHATS.remove(chat_id)
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute('DELETE FROM secret_chats WHERE chat_id = ?', (chat_id,))
-            await db.commit()
-            
-    await message.reply(f"✅ Чат <code>{chat_id}</code> добавлен в <b>белый список</b> как <b>{city_name}</b>.\nТеперь он будет светиться в глобальной статистике.")
+    if chat_id in IGNORED_CHATS: IGNORED_CHATS.remove(chat_id)
+        
+    await state.clear()
+    await message.reply(f"✅ Город <b>{city_name}</b> ({country}) успешно добавлен!\n📍 Координаты: {lat}, {lon}\n\nТеперь он появился в меню поиска городов и доступен для авто-подбора по ГЕО! 🔥")
 
 @dp.message(Command("delchat"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_delchat(message: types.Message):
@@ -298,62 +364,58 @@ async def cmd_delchat(message: types.Message):
     chat_id = int(chat_id_str)
     
     async with aiosqlite.connect(DB_NAME) as db:
+        # Удаляем из кнопок и гео, если чат был добавлен динамически
+        async with db.execute('SELECT country, city_name FROM dynamic_cities WHERE chat_id = ?', (chat_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                country, city_name = row
+                if country in DATABASE and city_name in DATABASE[country]:
+                    del DATABASE[country][city_name]
+                    if not DATABASE[country]: del DATABASE[country]
+                if city_name in FLAT_CITIES: del FLAT_CITIES[city_name]
+                
+        await db.execute('DELETE FROM dynamic_cities WHERE chat_id = ?', (chat_id,))
         await db.execute('DELETE FROM old_bot_chats WHERE chat_id = ?', (chat_id,))
         await db.commit()
         
     if chat_id in allowed_chats:
         allowed_chats.remove(chat_id)
         
-    await message.reply(f"🗑 Чат <code>{chat_id}</code> успешно удалён из белого списка.")
+    await message.reply(f"🗑 Чат <code>{chat_id}</code> успешно удалён из белого списка и из меню поиска городов.")
 
 # --- КОМАНДЫ ДЛЯ СЕКРЕТНЫХ ЧАТОВ ---
 @dp.message(Command("addsecret"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_addsecret(message: types.Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.reply("⚠️ Использование: <code>/addsecret <ID_чата></code>\nНапример: <code>/addsecret -1001234567890</code>")
+        await message.reply("⚠️ Использование: <code>/addsecret <ID_чата></code>")
         return
         
     chat_id_str = args[1]
-    if not chat_id_str.lstrip('-').isdigit():
-        await message.reply("❌ Неверный ID чата.")
-        return
-        
+    if not chat_id_str.lstrip('-').isdigit(): return
     chat_id = int(chat_id_str)
     
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('INSERT OR IGNORE INTO secret_chats (chat_id) VALUES (?)', (chat_id,))
-        # Удаляем из обычных чатов, чтобы точно не светился в глобальной статистике
         await db.execute('DELETE FROM old_bot_chats WHERE chat_id = ?', (chat_id,))
         await db.commit()
         
     IGNORED_CHATS.add(chat_id)
-    if chat_id in allowed_chats:
-        allowed_chats.remove(chat_id)
+    if chat_id in allowed_chats: allowed_chats.remove(chat_id)
         
-    await message.reply(f"🕵️‍♂️ Чат <code>{chat_id}</code> успешно добавлен в <b>секретный список</b>!\nТеперь он не будет светиться в глобальной статистике, но локальные /top и /call работают.")
+    await message.reply(f"🕵️‍♂️ Чат <code>{chat_id}</code> успешно добавлен в <b>секретный список</b>!\nВ общей статистике его больше нет.")
 
 @dp.message(Command("delsecret"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_delsecret(message: types.Message):
     args = message.text.split()
-    if len(args) < 2:
-        await message.reply("⚠️ Использование: <code>/delsecret <ID_чата></code>")
-        return
-        
-    chat_id_str = args[1]
-    if not chat_id_str.lstrip('-').isdigit():
-        await message.reply("❌ Неверный ID чата.")
-        return
-        
-    chat_id = int(chat_id_str)
+    if len(args) < 2: return
+    chat_id = int(args[1])
     
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('DELETE FROM secret_chats WHERE chat_id = ?', (chat_id,))
         await db.commit()
         
-    if chat_id in IGNORED_CHATS:
-        IGNORED_CHATS.remove(chat_id)
-        
+    if chat_id in IGNORED_CHATS: IGNORED_CHATS.remove(chat_id)
     await message.reply(f"🗑 Чат <code>{chat_id}</code> удалён из секретного списка.")
 
 # --- ОБРАБОТКА ФАЙЛОВ ОТ АДМИНА ---
