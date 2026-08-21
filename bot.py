@@ -33,12 +33,12 @@ ADMIN_ID = 2103317502
 REQUESTS_TOPIC_ID = 46 
 APPROVED_TOPIC_ID = 42 
 
+# Стартовый список игнорируемых чатов (пополняется из БД)
 IGNORED_CHATS = {-1003923209265}
 
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
 
-# Дефолтное значение (перезапишется из базы при старте)
 current_ping = {
     "type": "text",      
     "file_id": None,     
@@ -119,17 +119,22 @@ async def init_db():
         try: await db.execute('ALTER TABLE blacklist ADD COLUMN until_date TEXT')
         except Exception: pass
         
-        # --- ТАБЛИЦА ДЛЯ НАСТРОЕК КАЛЛА ---
+        # Настройки калла
         await db.execute('''CREATE TABLE IF NOT EXISTS ping_settings (
                             id INTEGER PRIMARY KEY, type TEXT, file_id TEXT, text TEXT)''')
         await db.execute('''INSERT OR IGNORE INTO ping_settings (id, type, file_id, text) 
                             VALUES (1, 'text', NULL, 'ПЯТЁРКА ПХ ПОБЕДА')''')
+        
+        # Таблица секретных чатов
+        await db.execute('''CREATE TABLE IF NOT EXISTS secret_chats (chat_id INTEGER PRIMARY KEY)''')
         await db.commit()
         
         async with db.execute('SELECT chat_id FROM old_bot_chats') as cursor:
             async for row in cursor: allowed_chats.add(row[0])
             
-        # Загружаем фразу калла из базы в оперативную память при включении
+        async with db.execute('SELECT chat_id FROM secret_chats') as cursor:
+            async for row in cursor: IGNORED_CHATS.add(row[0])
+            
         async with db.execute('SELECT type, file_id, text FROM ping_settings WHERE id = 1') as cursor:
             row = await cursor.fetchone()
             if row:
@@ -245,8 +250,113 @@ async def global_middleware(handler, event: types.Message, data):
 
 @dp.message(Command("chatid"))
 async def cmd_chatid(message: types.Message):
-    await message.reply(f"ID этого чата: <code>{message.chat.id}</code>\n<i>Скопируй его и напиши в описании к файлу result.json в личку боту.</i>")
+    await message.reply(f"ID этого чата: <code>{message.chat.id}</code>")
 
+# --- КОМАНДЫ ДЛЯ РУЧНОГО УПРАВЛЕНИЯ ЧАТАМИ ---
+@dp.message(Command("addchat"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
+async def cmd_addchat(message: types.Message):
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.reply("⚠️ Использование: <code>/addchat <ID_чата> <Название></code>\nНапример: <code>/addchat -1001234567890 Гараж 42</code>")
+        return
+    
+    chat_id_str = args[1]
+    city_name = args[2]
+    
+    if not chat_id_str.lstrip('-').isdigit():
+        await message.reply("❌ Неверный ID чата.")
+        return
+        
+    chat_id = int(chat_id_str)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('INSERT INTO old_bot_chats (chat_id, city_name) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET city_name=excluded.city_name', (chat_id, city_name))
+        await db.commit()
+        
+    allowed_chats.add(chat_id)
+    # Если чат был в секретных, убираем
+    if chat_id in IGNORED_CHATS:
+        IGNORED_CHATS.remove(chat_id)
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute('DELETE FROM secret_chats WHERE chat_id = ?', (chat_id,))
+            await db.commit()
+            
+    await message.reply(f"✅ Чат <code>{chat_id}</code> добавлен в <b>белый список</b> как <b>{city_name}</b>.\nТеперь он будет светиться в глобальной статистике.")
+
+@dp.message(Command("delchat"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
+async def cmd_delchat(message: types.Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.reply("⚠️ Использование: <code>/delchat <ID_чата></code>")
+        return
+        
+    chat_id_str = args[1]
+    if not chat_id_str.lstrip('-').isdigit():
+        await message.reply("❌ Неверный ID чата.")
+        return
+        
+    chat_id = int(chat_id_str)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('DELETE FROM old_bot_chats WHERE chat_id = ?', (chat_id,))
+        await db.commit()
+        
+    if chat_id in allowed_chats:
+        allowed_chats.remove(chat_id)
+        
+    await message.reply(f"🗑 Чат <code>{chat_id}</code> успешно удалён из белого списка.")
+
+# --- КОМАНДЫ ДЛЯ СЕКРЕТНЫХ ЧАТОВ ---
+@dp.message(Command("addsecret"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
+async def cmd_addsecret(message: types.Message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("⚠️ Использование: <code>/addsecret <ID_чата></code>\nНапример: <code>/addsecret -1001234567890</code>")
+        return
+        
+    chat_id_str = args[1]
+    if not chat_id_str.lstrip('-').isdigit():
+        await message.reply("❌ Неверный ID чата.")
+        return
+        
+    chat_id = int(chat_id_str)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('INSERT OR IGNORE INTO secret_chats (chat_id) VALUES (?)', (chat_id,))
+        # Удаляем из обычных чатов, чтобы точно не светился в глобальной статистике
+        await db.execute('DELETE FROM old_bot_chats WHERE chat_id = ?', (chat_id,))
+        await db.commit()
+        
+    IGNORED_CHATS.add(chat_id)
+    if chat_id in allowed_chats:
+        allowed_chats.remove(chat_id)
+        
+    await message.reply(f"🕵️‍♂️ Чат <code>{chat_id}</code> успешно добавлен в <b>секретный список</b>!\nТеперь он не будет светиться в глобальной статистике, но локальные /top и /call работают.")
+
+@dp.message(Command("delsecret"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
+async def cmd_delsecret(message: types.Message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("⚠️ Использование: <code>/delsecret <ID_чата></code>")
+        return
+        
+    chat_id_str = args[1]
+    if not chat_id_str.lstrip('-').isdigit():
+        await message.reply("❌ Неверный ID чата.")
+        return
+        
+    chat_id = int(chat_id_str)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('DELETE FROM secret_chats WHERE chat_id = ?', (chat_id,))
+        await db.commit()
+        
+    if chat_id in IGNORED_CHATS:
+        IGNORED_CHATS.remove(chat_id)
+        
+    await message.reply(f"🗑 Чат <code>{chat_id}</code> удалён из секретного списка.")
+
+# --- ОБРАБОТКА ФАЙЛОВ ОТ АДМИНА ---
 @dp.message(F.chat.type == "private", F.from_user.id == ADMIN_ID, F.document)
 async def handle_admin_files(message: types.Message):
     doc_name = message.document.file_name
@@ -290,7 +400,6 @@ async def handle_admin_files(message: types.Message):
                     
                 if uid_str and uname:
                     if uid_str.startswith("user"): uid_str = uid_str.replace("user", "")
-                    
                     if uid_str.lstrip("-").isdigit():
                         uid = int(uid_str)
                         if uid > 0: users_to_add[uid] = uname
@@ -728,7 +837,6 @@ async def set_new_phrase(message: types.Message):
             return
         current_ping = {"type": "text", "file_id": None, "text": text_html}
         
-    # Сохраняем в базу данных, чтобы не слетало при перезагрузке
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('''UPDATE ping_settings SET type = ?, file_id = ?, text = ? WHERE id = 1''',
                          (current_ping["type"], current_ping["file_id"], current_ping["text"]))
