@@ -247,15 +247,15 @@ async def handle_admin_files(message: types.Message):
             await auto_fetch_chats()
         await message.reply(f"✅ Файл <b>{doc_name}</b> успешно восстановлен! Бот готов к работе.")
 
-    # Импорт JSON из Telegram Desktop
+    # Обновленный Импорт JSON из Telegram Desktop
     elif doc_name.endswith(".json"):
         args = message.caption.split() if message.caption else []
         if not args or not (args[0].lstrip('-').isdigit()):
-            await message.reply("⚠️ Ошибка! Скинь файл выгрузки `result.json` и в **описании (caption)** к файлу напиши ID чата (например: `-1001234567890`).\n\n<i>Узнать ID можно командой /chatid в нужной группе.</i>")
+            await message.reply("⚠️ Ошибка! Скинь файл выгрузки `result.json` и в **описании (caption)** к файлу напиши ID чата (например: `-1001234567890`).")
             return
 
         chat_id = int(args[0])
-        await message.reply(f"⏳ Читаю выгрузку Telegram (JSON) и собираю пользователей для чата <code>{chat_id}</code>...")
+        await message.reply(f"⏳ Читаю выгрузку Telegram (JSON) и вытягиваю АБСОЛЮТНО ВСЕХ пользователей для чата <code>{chat_id}</code>...")
         
         file = await bot.get_file(message.document.file_id)
         await bot.download_file(file.file_path, destination="temp_export.json")
@@ -266,30 +266,46 @@ async def handle_admin_files(message: types.Message):
                 
             users_to_add = {}
             for msg in data.get("messages", []):
-                # Ищем только сообщения от реальных людей
-                if msg.get("type") == "message" and "from_id" in msg and "from" in msg:
+                uid_str = None
+                uname = None
+                
+                # 1. Обычные сообщения (кто-то что-то написал)
+                if "from_id" in msg and "from" in msg:
                     uid_str = str(msg["from_id"])
-                    # В выгрузке телеги ID начинаются с "user" (например: user123456)
+                    uname = msg["from"]
+                # 2. Системные сообщения (вступил в группу, пригласили, сменил фотку и т.д.)
+                elif "actor_id" in msg and "actor" in msg:
+                    uid_str = str(msg["actor_id"])
+                    uname = msg["actor"]
+                    
+                if uid_str and uname:
+                    # Очищаем префиксы от старых и новых версий Телеги
                     if uid_str.startswith("user"):
-                        uid = int(uid_str.replace("user", ""))
-                        uname = msg["from"]
-                        users_to_add[uid] = uname
+                        uid_str = uid_str.replace("user", "")
+                    
+                    if uid_str.lstrip("-").isdigit():
+                        uid = int(uid_str)
+                        if uid > 0: # Добавляем только реальных людей (не ботов/каналы)
+                            users_to_add[uid] = uname
                         
             if not users_to_add:
-                await message.reply("⚠️ В файле не найдено ни одного сообщения от пользователей. Убедись, что это правильная выгрузка истории чата.")
+                await message.reply("⚠️ В файле не найдено ни одного пользователя. Убедись, что это правильная выгрузка истории чата.")
                 return
 
             async with aiosqlite.connect(DB_NAME) as db:
                 for uid, uname in users_to_add.items():
+                    # Жестко прописываем минимум 1 сообщение всем найденным юзерам, даже если они молчуны
                     await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count) 
                                         VALUES (?, ?, ?, 1)
-                                        ON CONFLICT(user_id, chat_id) DO NOTHING''', 
+                                        ON CONFLICT(user_id, chat_id) DO UPDATE SET 
+                                        message_count = CASE WHEN message_count = 0 THEN 1 ELSE message_count END,
+                                        user_name = excluded.user_name''', 
                                         (uid, chat_id, uname))
                     await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', 
                                      (uid, uname))
                 await db.commit()
                 
-            await message.reply(f"✅ Успешно извлечено и добавлено <b>{len(users_to_add)}</b> уникальных пользователей!\nОни уже готовы к призыву в калле.")
+            await message.reply(f"✅ Успешно извлечено и добавлено <b>{len(users_to_add)}</b> уникальных пользователей (включая молчунов)!\nОни уже готовы к призыву в калле.")
         except Exception as e:
             await message.reply(f"❌ Ошибка при чтении файла JSON: {e}")
         finally:
@@ -594,11 +610,11 @@ async def reply_from_group(message: types.Message):
             await message.reply("✅ Ответ переслан пользователю!")
         except Exception as e: await message.reply(f"❌ Ошибка отправки (возможно, юзер заблокировал бота): {e}")
 
-@dp.message(Command("ban"), F.chat.id == ALLOWED_GROUP_ID)
-async def cmd_ban(message: types.Message):
+@dp.message(Command("worldBan"), F.chat.id == ALLOWED_GROUP_ID)
+async def cmd_worldBan(message: types.Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.reply("⚠️ Использование: <code>/ban @username</code> или <code>/ban ID</code>")
+        await message.reply("⚠️ Использование: <code>/worldBan @username</code> или <code>/worldBan ID</code>")
         return
         
     target = args[1].replace("@", "")
@@ -613,13 +629,21 @@ async def cmd_ban(message: types.Message):
                 user_id = row[0]
         await db.execute('INSERT OR REPLACE INTO blacklist (user_id, until_date) VALUES (?, NULL)', (user_id,))
         await db.commit()
-    await message.reply(f"✅ Пользователь <code>{user_id}</code> навсегда забанен в ЛС бота.")
+        
+    success = 0
+    for cid in allowed_chats:
+        try:
+            await bot.ban_chat_member(chat_id=cid, user_id=user_id)
+            success += 1
+        except Exception: pass
+        
+    await message.reply(f"💀 <b>ПОЛНЫЙ БАН ВЕЗДЕ!</b>\nПользователь <code>{user_id}</code> полностью отключен от всех функций бота, заблокирован в ЛС и выкинут из {success} чатов сети.")
 
-@dp.message(Command("unban"), F.chat.id == ALLOWED_GROUP_ID)
-async def cmd_unban(message: types.Message):
+@dp.message(Command("worldUnban"), F.chat.id == ALLOWED_GROUP_ID)
+async def cmd_worldUnban(message: types.Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.reply("⚠️ Использование: <code>/unban @username</code> или <code>/unban ID</code>")
+        await message.reply("⚠️ Использование: <code>/worldUnban @username</code> или <code>/worldUnban ID</code>")
         return
         
     target = args[1].replace("@", "")
@@ -634,7 +658,15 @@ async def cmd_unban(message: types.Message):
                 user_id = row[0]
         await db.execute('DELETE FROM blacklist WHERE user_id = ?', (user_id,))
         await db.commit()
-    await message.reply(f"✅ Пользователь <code>{user_id}</code> удален из черного списка ЛС бота.")
+        
+    success = 0
+    for cid in allowed_chats:
+        try:
+            await bot.unban_chat_member(chat_id=cid, user_id=user_id, only_if_banned=True)
+            success += 1
+        except Exception: pass
+        
+    await message.reply(f"🕊 <b>ГЛОБАЛЬНЫЙ РАЗБАН!</b>\nПользователь <code>{user_id}</code> удален из черного списка бота и разбанен в {success} чатах. Ему снова доступны все функции.")
 
 @dp.message(Command("mut"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_mut_in_chat(message: types.Message):
