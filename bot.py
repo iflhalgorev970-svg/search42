@@ -38,6 +38,7 @@ IGNORED_CHATS = {-1003923209265}
 DB_NAME = "database.db"
 LOG_FILE = "users_log.csv"
 
+# Дефолтное значение (перезапишется из базы при старте)
 current_ping = {
     "type": "text",      
     "file_id": None,     
@@ -99,6 +100,7 @@ async def log_to_sheets(user_id, username, action, geo="Нет гео"):
     await asyncio.to_thread(write_sync)
 
 async def init_db():
+    global current_ping
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('''CREATE TABLE IF NOT EXISTS stats (
                             user_id INTEGER, chat_id INTEGER, user_name TEXT, message_count INTEGER DEFAULT 0,
@@ -116,10 +118,24 @@ async def init_db():
         await db.execute('''CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY, until_date TEXT)''')
         try: await db.execute('ALTER TABLE blacklist ADD COLUMN until_date TEXT')
         except Exception: pass
+        
+        # --- ТАБЛИЦА ДЛЯ НАСТРОЕК КАЛЛА ---
+        await db.execute('''CREATE TABLE IF NOT EXISTS ping_settings (
+                            id INTEGER PRIMARY KEY, type TEXT, file_id TEXT, text TEXT)''')
+        await db.execute('''INSERT OR IGNORE INTO ping_settings (id, type, file_id, text) 
+                            VALUES (1, 'text', NULL, 'ПЯТЁРКА ПХ ПОБЕДА')''')
         await db.commit()
         
         async with db.execute('SELECT chat_id FROM old_bot_chats') as cursor:
             async for row in cursor: allowed_chats.add(row[0])
+            
+        # Загружаем фразу калла из базы в оперативную память при включении
+        async with db.execute('SELECT type, file_id, text FROM ping_settings WHERE id = 1') as cursor:
+            row = await cursor.fetchone()
+            if row:
+                current_ping["type"] = row[0]
+                current_ping["file_id"] = row[1]
+                current_ping["text"] = row[2] if row[2] is not None else ""
 
 async def update_profile(user_id, username, pm_start=False, chat_msg=False, action=None, geo=None, chat_name=None):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -227,17 +243,14 @@ async def global_middleware(handler, event: types.Message, data):
                     await db.commit()
     return await handler(event, data)
 
-# --- УЗНАТЬ ID ЧАТА ДЛЯ ИМПОРТА ---
 @dp.message(Command("chatid"))
 async def cmd_chatid(message: types.Message):
     await message.reply(f"ID этого чата: <code>{message.chat.id}</code>\n<i>Скопируй его и напиши в описании к файлу result.json в личку боту.</i>")
 
-# --- ОБРАБОТКА ФАЙЛОВ ОТ АДМИНА (БЭКАПЫ И JSON ТЕЛЕГРАМА) ---
 @dp.message(F.chat.type == "private", F.from_user.id == ADMIN_ID, F.document)
 async def handle_admin_files(message: types.Message):
     doc_name = message.document.file_name
     
-    # Восстановление базы
     if doc_name in [DB_NAME, LOG_FILE]:
         await message.reply(f"⏳ Скачиваю файл <b>{doc_name}</b>...")
         file = await bot.get_file(message.document.file_id)
@@ -247,7 +260,6 @@ async def handle_admin_files(message: types.Message):
             await auto_fetch_chats()
         await message.reply(f"✅ Файл <b>{doc_name}</b> успешно восстановлен! Бот готов к работе.")
 
-    # Обновленный Импорт JSON из Telegram Desktop
     elif doc_name.endswith(".json"):
         args = message.caption.split() if message.caption else []
         if not args or not (args[0].lstrip('-').isdigit()):
@@ -269,24 +281,19 @@ async def handle_admin_files(message: types.Message):
                 uid_str = None
                 uname = None
                 
-                # 1. Обычные сообщения (кто-то что-то написал)
                 if "from_id" in msg and "from" in msg:
                     uid_str = str(msg["from_id"])
                     uname = msg["from"]
-                # 2. Системные сообщения (вступил в группу, пригласили, сменил фотку и т.д.)
                 elif "actor_id" in msg and "actor" in msg:
                     uid_str = str(msg["actor_id"])
                     uname = msg["actor"]
                     
                 if uid_str and uname:
-                    # Очищаем префиксы от старых и новых версий Телеги
-                    if uid_str.startswith("user"):
-                        uid_str = uid_str.replace("user", "")
+                    if uid_str.startswith("user"): uid_str = uid_str.replace("user", "")
                     
                     if uid_str.lstrip("-").isdigit():
                         uid = int(uid_str)
-                        if uid > 0: # Добавляем только реальных людей (не ботов/каналы)
-                            users_to_add[uid] = uname
+                        if uid > 0: users_to_add[uid] = uname
                         
             if not users_to_add:
                 await message.reply("⚠️ В файле не найдено ни одного пользователя. Убедись, что это правильная выгрузка истории чата.")
@@ -294,23 +301,20 @@ async def handle_admin_files(message: types.Message):
 
             async with aiosqlite.connect(DB_NAME) as db:
                 for uid, uname in users_to_add.items():
-                    # Жестко прописываем минимум 1 сообщение всем найденным юзерам, даже если они молчуны
                     await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count) 
                                         VALUES (?, ?, ?, 1)
                                         ON CONFLICT(user_id, chat_id) DO UPDATE SET 
                                         message_count = CASE WHEN message_count = 0 THEN 1 ELSE message_count END,
                                         user_name = excluded.user_name''', 
                                         (uid, chat_id, uname))
-                    await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', 
-                                     (uid, uname))
+                    await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', (uid, uname))
                 await db.commit()
                 
             await message.reply(f"✅ Успешно извлечено и добавлено <b>{len(users_to_add)}</b> уникальных пользователей (включая молчунов)!\nОни уже готовы к призыву в калле.")
         except Exception as e:
             await message.reply(f"❌ Ошибка при чтении файла JSON: {e}")
         finally:
-            if os.path.exists("temp_export.json"):
-                os.remove("temp_export.json")
+            if os.path.exists("temp_export.json"): os.remove("temp_export.json")
 
 @dp.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -724,7 +728,13 @@ async def set_new_phrase(message: types.Message):
             return
         current_ping = {"type": "text", "file_id": None, "text": text_html}
         
-    await message.reply(f"✅ Установлен новый формат калла: <b>{current_ping['type'].upper()}</b>\n\n(Всё оформление, ссылки и медиа сохранены!)")
+    # Сохраняем в базу данных, чтобы не слетало при перезагрузке
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('''UPDATE ping_settings SET type = ?, file_id = ?, text = ? WHERE id = 1''',
+                         (current_ping["type"], current_ping["file_id"], current_ping["text"]))
+        await db.commit()
+        
+    await message.reply(f"✅ Установлен новый формат калла: <b>{current_ping['type'].upper()}</b>\n\n(Всё оформление, ссылки и медиа сохранены в базу!)")
 
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_top(message: types.Message):
