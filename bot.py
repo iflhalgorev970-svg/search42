@@ -44,7 +44,6 @@ current_ping = {
     "text": "ПЯТЁРКА ПХ ПОБЕДА" 
 }
 
-# Хардкодная база (останется как основа, новые города будут добавляться сюда динамически)
 DATABASE = {
     "Россия": {
         "Москва": {"coords": (55.7558, 37.6173), "link": "https://t.me/bratyxi42msk"},
@@ -125,22 +124,16 @@ async def init_db():
                             VALUES (1, 'text', NULL, 'ПЯТЁРКА ПХ ПОБЕДА')''')
         
         await db.execute('''CREATE TABLE IF NOT EXISTS secret_chats (chat_id INTEGER PRIMARY KEY)''')
-        
-        # --- ТАБЛИЦА ДИНАМИЧЕСКИХ ГОРОДОВ ---
         await db.execute('''CREATE TABLE IF NOT EXISTS dynamic_cities (
                             chat_id INTEGER PRIMARY KEY, country TEXT, city_name TEXT, link TEXT, lat REAL, lon REAL)''')
-                            
         await db.commit()
         
-        # Подгружаем разрешенные чаты
         async with db.execute('SELECT chat_id FROM old_bot_chats') as cursor:
             async for row in cursor: allowed_chats.add(row[0])
             
-        # Подгружаем секретные чаты
         async with db.execute('SELECT chat_id FROM secret_chats') as cursor:
             async for row in cursor: IGNORED_CHATS.add(row[0])
             
-        # Подгружаем фразу калла
         async with db.execute('SELECT type, file_id, text FROM ping_settings WHERE id = 1') as cursor:
             row = await cursor.fetchone()
             if row:
@@ -148,7 +141,6 @@ async def init_db():
                 current_ping["file_id"] = row[1]
                 current_ping["text"] = row[2] if row[2] is not None else ""
                 
-        # --- ПОДГРУЖАЕМ ДИНАМИЧЕСКИЕ ГОРОДА В КНОПКИ И ГЕО ---
         async with db.execute('SELECT chat_id, country, city_name, link, lat, lon FROM dynamic_cities') as cursor:
             async for row in cursor:
                 cid, country, city, link, lat, lon = row
@@ -270,11 +262,18 @@ async def global_middleware(handler, event: types.Message, data):
                     await db.commit()
     return await handler(event, data)
 
+# ==========================================
+# АДМИНСКИЕ КОМАНДЫ (Перенесены вверх)
+# ==========================================
+
 @dp.message(Command("chatid"))
 async def cmd_chatid(message: types.Message):
     await message.reply(f"ID этого чата: <code>{message.chat.id}</code>")
 
-# --- КОМАНДЫ ДЛЯ РУЧНОГО УПРАВЛЕНИЯ ЧАТАМИ И ГОРОДАМИ ---
+@dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
+async def cmd_backup(message: types.Message):
+    await send_auto_backup(bot, "Ручной запрос /backup")
+
 @dp.message(Command("addchat"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_addchat_start(message: types.Message, state: FSMContext):
     args = message.text.split(maxsplit=2)
@@ -284,13 +283,11 @@ async def cmd_addchat_start(message: types.Message, state: FSMContext):
     
     chat_id_str = args[1]
     city_name = args[2]
-    
     if not chat_id_str.lstrip('-').isdigit():
-        await message.reply("❌ Неверный ID чата. Он должен состоять из цифр (обычно с минусом).")
+        await message.reply("❌ Неверный ID чата.")
         return
         
     chat_id = int(chat_id_str)
-    
     await state.update_data(new_chat_id=chat_id, new_city_name=city_name)
     await state.set_state(AdminAddChat.waiting_country)
     await message.reply(f"🏙 Город: <b>{city_name}</b>\n\n🌍 <b>Шаг 1/3:</b> Отправь название страны (например: <code>Россия</code>, <code>Беларусь</code>):", reply_markup=ReplyKeyboardRemove())
@@ -305,7 +302,7 @@ async def cmd_addchat_country(message: types.Message, state: FSMContext):
 async def cmd_addchat_link(message: types.Message, state: FSMContext):
     await state.update_data(new_link=message.text.strip())
     await state.set_state(AdminAddChat.waiting_coords)
-    await message.reply("📍 <b>Шаг 3/3:</b> Теперь отправь координаты города.\nМожешь скинуть их через запятую (например: <code>43.5855, 39.7231</code>) или просто прикрепи <b>геопозицию</b> с карты Телеграма:")
+    await message.reply("📍 <b>Шаг 3/3:</b> Теперь отправь координаты города.\nМожешь скинуть их через запятую (например: <code>43.58, 39.72</code>) или просто прикрепи <b>геопозицию</b> с карты:")
 
 @dp.message(AdminAddChat.waiting_coords, F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_addchat_coords(message: types.Message, state: FSMContext):
@@ -328,7 +325,6 @@ async def cmd_addchat_coords(message: types.Message, state: FSMContext):
     country = data['new_country']
     link = data['new_link']
     
-    # Обновляем оперативную память бота
     if country not in DATABASE: DATABASE[country] = {}
     DATABASE[country][city_name] = {"coords": (lat, lon), "link": link}
     FLAT_CITIES[city_name] = {"coords": (lat, lon), "link": link}
@@ -336,7 +332,6 @@ async def cmd_addchat_coords(message: types.Message, state: FSMContext):
         uname = "@" + link.split("t.me/")[1]
         if uname not in CHAT_USERNAMES: CHAT_USERNAMES.append(uname)
         
-    # Записываем в базу данных
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('INSERT OR REPLACE INTO dynamic_cities (chat_id, country, city_name, link, lat, lon) VALUES (?, ?, ?, ?, ?, ?)', (chat_id, country, city_name, link, lat, lon))
         await db.execute('INSERT INTO old_bot_chats (chat_id, city_name) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET city_name=excluded.city_name', (chat_id, city_name))
@@ -357,14 +352,11 @@ async def cmd_delchat(message: types.Message):
         return
         
     chat_id_str = args[1]
-    if not chat_id_str.lstrip('-').isdigit():
-        await message.reply("❌ Неверный ID чата.")
-        return
+    if not chat_id_str.lstrip('-').isdigit(): return
         
     chat_id = int(chat_id_str)
     
     async with aiosqlite.connect(DB_NAME) as db:
-        # Удаляем из кнопок и гео, если чат был добавлен динамически
         async with db.execute('SELECT country, city_name FROM dynamic_cities WHERE chat_id = ?', (chat_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
@@ -378,19 +370,13 @@ async def cmd_delchat(message: types.Message):
         await db.execute('DELETE FROM old_bot_chats WHERE chat_id = ?', (chat_id,))
         await db.commit()
         
-    if chat_id in allowed_chats:
-        allowed_chats.remove(chat_id)
-        
+    if chat_id in allowed_chats: allowed_chats.remove(chat_id)
     await message.reply(f"🗑 Чат <code>{chat_id}</code> успешно удалён из белого списка и из меню поиска городов.")
 
-# --- КОМАНДЫ ДЛЯ СЕКРЕТНЫХ ЧАТОВ ---
 @dp.message(Command("addsecret"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_addsecret(message: types.Message):
     args = message.text.split()
-    if len(args) < 2:
-        await message.reply("⚠️ Использование: <code>/addsecret <ID_чата></code>")
-        return
-        
+    if len(args) < 2: return
     chat_id_str = args[1]
     if not chat_id_str.lstrip('-').isdigit(): return
     chat_id = int(chat_id_str)
@@ -402,7 +388,6 @@ async def cmd_addsecret(message: types.Message):
         
     IGNORED_CHATS.add(chat_id)
     if chat_id in allowed_chats: allowed_chats.remove(chat_id)
-        
     await message.reply(f"🕵️‍♂️ Чат <code>{chat_id}</code> успешно добавлен в <b>секретный список</b>!\nВ общей статистике его больше нет.")
 
 @dp.message(Command("delsecret"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
@@ -418,7 +403,6 @@ async def cmd_delsecret(message: types.Message):
     if chat_id in IGNORED_CHATS: IGNORED_CHATS.remove(chat_id)
     await message.reply(f"🗑 Чат <code>{chat_id}</code> удалён из секретного списка.")
 
-# --- ОБРАБОТКА ФАЙЛОВ ОТ АДМИНА ---
 @dp.message(F.chat.type == "private", F.from_user.id == ADMIN_ID, F.document)
 async def handle_admin_files(message: types.Message):
     doc_name = message.document.file_name
@@ -435,11 +419,11 @@ async def handle_admin_files(message: types.Message):
     elif doc_name.endswith(".json"):
         args = message.caption.split() if message.caption else []
         if not args or not (args[0].lstrip('-').isdigit()):
-            await message.reply("⚠️ Ошибка! Скинь файл выгрузки `result.json` и в **описании (caption)** к файлу напиши ID чата (например: `-1001234567890`).")
+            await message.reply("⚠️ Ошибка! Скинь файл выгрузки `result.json` и в **описании (caption)** к файлу напиши ID чата.")
             return
 
         chat_id = int(args[0])
-        await message.reply(f"⏳ Читаю выгрузку Telegram (JSON) и вытягиваю АБСОЛЮТНО ВСЕХ пользователей для чата <code>{chat_id}</code>...")
+        await message.reply(f"⏳ Читаю выгрузку Telegram (JSON) для чата <code>{chat_id}</code>...")
         
         file = await bot.get_file(message.document.file_id)
         await bot.download_file(file.file_path, destination="temp_export.json")
@@ -467,7 +451,7 @@ async def handle_admin_files(message: types.Message):
                         if uid > 0: users_to_add[uid] = uname
                         
             if not users_to_add:
-                await message.reply("⚠️ В файле не найдено ни одного пользователя. Убедись, что это правильная выгрузка истории чата.")
+                await message.reply("⚠️ В файле не найдено ни одного пользователя.")
                 return
 
             async with aiosqlite.connect(DB_NAME) as db:
@@ -481,11 +465,15 @@ async def handle_admin_files(message: types.Message):
                     await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', (uid, uname))
                 await db.commit()
                 
-            await message.reply(f"✅ Успешно извлечено и добавлено <b>{len(users_to_add)}</b> уникальных пользователей (включая молчунов)!\nОни уже готовы к призыву в калле.")
+            await message.reply(f"✅ Добавлено <b>{len(users_to_add)}</b> уникальных пользователей!")
         except Exception as e:
             await message.reply(f"❌ Ошибка при чтении файла JSON: {e}")
         finally:
             if os.path.exists("temp_export.json"): os.remove("temp_export.json")
+
+# ==========================================
+# ОСНОВНЫЕ КОМАНДЫ (МЕНЮ ЮЗЕРА)
+# ==========================================
 
 @dp.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -663,8 +651,16 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
         admin_msg_to_user[sent_msg.message_id] = user.id
     except Exception as e: logging.error(f"Ошибка тикета: {e}")
 
+# ==========================================
+# ПЕРЕХВАТЧИК ЛС (САППОРТ СИСТЕМА)
+# ==========================================
+
 @dp.message(F.chat.type == "private")
 async def catch_all_pms(message: types.Message):
+    # Игнорируем любые команды со слэшем, чтобы они не летели в саппорт
+    if message.text and message.text.startswith("/"): return
+    if message.caption and message.caption.startswith("/"): return
+
     await update_profile(message.from_user.id, message.from_user.username, action="Написал в бота (Саппорт)")
     user_link = f"@{message.from_user.username}" if message.from_user.username else "Без юзернейма"
     header = f"📩 <b>Новое сообщение</b>\n👤 {escape(message.from_user.full_name)}\n🆔 <code>{message.from_user.id}</code>\n🔗 {user_link}"
@@ -675,6 +671,10 @@ async def catch_all_pms(message: types.Message):
         copied_msg = await message.copy_to(chat_id=ALLOWED_GROUP_ID, message_thread_id=REQUESTS_TOPIC_ID, reply_markup=kb)
         admin_msg_to_user[copied_msg.message_id] = message.from_user.id
     except Exception as e: logging.error(f"Ошибка пересылки ЛС: {e}")
+
+# ==========================================
+# АДМИНКА (КНОПКИ И ОБРАБОТЧИКИ НАКАЗАНИЙ)
+# ==========================================
 
 @dp.callback_query(F.data.startswith("punish:"))
 async def punish_menu(callback: types.CallbackQuery):
@@ -988,10 +988,6 @@ async def cmd_call(message: types.Message):
             elif m_type == "animation": await message.reply_animation(animation=f_id, caption=final_text)
             await asyncio.sleep(1)
         except Exception as e: logging.error(f"Ошибка калла: {e}")
-
-@dp.message(Command("backup"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
-async def cmd_backup(message: types.Message):
-    await send_auto_backup(bot, "Ручной запрос /backup")
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def collect_stats(message: types.Message):
