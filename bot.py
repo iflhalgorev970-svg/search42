@@ -108,7 +108,6 @@ async def init_db():
                             is_active INTEGER DEFAULT 1,
                             PRIMARY KEY (user_id, chat_id))''')
         
-        # Обновление базы, если она старая (добавление колонки is_active)
         try: await db.execute('ALTER TABLE stats ADD COLUMN is_active INTEGER DEFAULT 1')
         except Exception: pass
         
@@ -277,13 +276,10 @@ async def global_middleware(handler, event: types.Message, data):
 async def on_chat_member_update(event: types.ChatMemberUpdated):
     user_id = event.new_chat_member.user.id
     chat_id = event.chat.id
-    # Если юзер вышел, кикнут или забанен
     if event.new_chat_member.status in ['left', 'kicked', 'banned']:
         async with aiosqlite.connect(DB_NAME) as db:
-            # Мягкое удаление (скрываем из топов)
             await db.execute('UPDATE stats SET is_active = 0 WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
             await db.commit()
-    # Если юзер вернулся или его разбанили
     elif event.new_chat_member.status in ['member', 'administrator', 'creator', 'restricted']:
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute('UPDATE stats SET is_active = 1 WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
@@ -487,7 +483,7 @@ async def handle_admin_files(message: types.Message):
                         if member.status not in ['left', 'kicked', 'banned']:
                             is_active = 1
                     except Exception:
-                        pass # Юзер вышел или бот его не видит
+                        pass
                     
                     await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count, is_active) 
                                         VALUES (?, ?, ?, 1, ?)
@@ -499,7 +495,7 @@ async def handle_admin_files(message: types.Message):
                     await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', (uid, uname))
                     
                     if is_active: actual_active += 1
-                    await asyncio.sleep(0.05) # Не спамим API Телеграма
+                    await asyncio.sleep(0.05)
                 await db.commit()
                 
             await status_msg.edit_text(f"✅ Готово! Сохранено в базу: <b>{len(users_to_add)}</b> чел.\nИз них сейчас активны в чате: <b>{actual_active}</b> чел.")
@@ -536,7 +532,6 @@ async def find_chat_start(message: types.Message, state: FSMContext):
 @dp.message(F.text == "📊 Статистика", F.chat.type == "private")
 async def global_stats(message: types.Message):
     async with aiosqlite.connect(DB_NAME) as db:
-        # Учитываем только активных пользователей для глобальной статы
         query = '''SELECT o.city_name, SUM(s.message_count) as total 
                    FROM stats s 
                    JOIN old_bot_chats o ON s.chat_id = o.chat_id 
@@ -904,9 +899,22 @@ async def cmd_mut_in_chat(message: types.Message):
         
     until_date = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
     try:
-        await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target_id, permissions=types.ChatPermissions(can_send_messages=False), until_date=until_date)
-        await message.reply(f"🔇 Пользователь ограничен в этом чате на {minutes} минут.")
-    except Exception as e: await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
+        permissions = types.ChatPermissions(
+            can_send_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False
+        )
+        await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target_id, permissions=permissions, until_date=until_date)
+        await message.reply(f"🔇 Пользователь ограничен в этом чате на {minutes} минут.\n<i>(Писать текст и слать медиа нельзя, но реакции ставить может 👍)</i>")
+    except Exception as e: 
+        await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
 
 @dp.message(Command("unmut"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_unmut_in_chat(message: types.Message):
@@ -940,7 +948,6 @@ async def cmd_unmut_in_chat(message: types.Message):
         await message.reply(f"🔊 Пользователь размучен и снова может писать в этот чат.")
     except Exception as e: await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
 
-
 @dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
 async def set_new_phrase(message: types.Message):
     global current_ping
@@ -969,7 +976,24 @@ async def set_new_phrase(message: types.Message):
                          (current_ping["type"], current_ping["file_id"], current_ping["text"]))
         await db.commit()
         
-    await message.reply(f"✅ Установлен новый формат калла: <b>{current_ping['type'].upper()}</b>\n\n(Всё оформление, ссылки и медиа сохранены в базу!)")
+    preview_msg = await message.reply(f"✅ Установлен новый формат калла: <b>{current_ping['type'].upper()}</b>\n\n👇 <i>Так это будет выглядеть:</i>")
+    
+    try:
+        m_type = current_ping["type"]
+        f_id = current_ping["file_id"]
+        c_text = current_ping["text"]
+        
+        demo_mentions = '<a href="tg://user?id=123">@user1</a> <a href="tg://user?id=124">@user2</a>'
+        final_demo_text = f"{demo_mentions}\n{c_text}" if c_text else demo_mentions
+
+        if m_type == "text": await preview_msg.reply(final_demo_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        elif m_type == "photo": await preview_msg.reply_photo(photo=f_id, caption=final_demo_text)
+        elif m_type == "video": await preview_msg.reply_video(video=f_id, caption=final_demo_text)
+        elif m_type == "audio": await preview_msg.reply_audio(audio=f_id, caption=final_demo_text)
+        elif m_type == "voice": await preview_msg.reply_voice(voice=f_id, caption=final_demo_text)
+        elif m_type == "animation": await preview_msg.reply_animation(animation=f_id, caption=final_demo_text)
+    except Exception as e:
+        logging.error(f"Ошибка калла: {e}")
 
 @dp.message(Command("top", "стата"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_top(message: types.Message):
@@ -983,7 +1007,6 @@ async def send_top_page(message_or_call, page):
     offset = page * limit
     
     async with aiosqlite.connect(DB_NAME) as db:
-        # Выбираем только АКТИВНЫХ пользователей (is_active = 1)
         async with db.execute('SELECT user_name, message_count FROM stats WHERE chat_id = ? AND message_count > 0 AND is_active = 1 ORDER BY message_count DESC LIMIT ? OFFSET ?', (chat_id, limit, offset)) as cursor:
             rows = await cursor.fetchall()
         async with db.execute('SELECT COUNT(*) FROM stats WHERE chat_id = ? AND message_count > 0 AND is_active = 1', (chat_id,)) as cursor:
@@ -1025,7 +1048,6 @@ async def cmd_call(message: types.Message):
     admin_text = parts[1] if len(parts) > 1 else ""
         
     async with aiosqlite.connect(DB_NAME) as db:
-        # Зовем только АКТИВНЫХ пользователей (is_active = 1)
         async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ? AND message_count > 0 AND is_active = 1', (chat_id,)) as cursor:
             users = await cursor.fetchall()
             
@@ -1067,7 +1089,6 @@ async def collect_stats(message: types.Message):
     await update_profile(message.from_user.id, message.from_user.username, chat_msg=True, chat_name=matched_city)
     
     async with aiosqlite.connect(DB_NAME) as db:
-        # Если юзер написал, мы гарантированно ставим ему is_active = 1
         await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count, is_active) VALUES (?, ?, ?, 1, 1)
                             ON CONFLICT(user_id, chat_id) DO UPDATE SET message_count = message_count + 1, user_name = excluded.user_name, is_active = 1''', 
                             (message.from_user.id, message.chat.id, message.from_user.full_name))
