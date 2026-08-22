@@ -653,10 +653,6 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
         admin_msg_to_user[sent_msg.message_id] = user.id
     except Exception as e: logging.error(f"Ошибка тикета: {e}")
 
-# ==========================================
-# ПЕРЕХВАТЧИК ЛС И НАКАЗАНИЯ
-# ==========================================
-
 @dp.message(F.chat.type == "private")
 async def catch_all_pms(message: types.Message):
     if message.text and message.text.startswith("/"): return
@@ -782,10 +778,6 @@ async def reply_from_group(message: types.Message):
             await message.reply("✅ Ответ переслан пользователю!")
         except Exception as e: await message.reply(f"❌ Ошибка отправки (возможно, юзер заблокировал бота): {e}")
 
-# ==========================================
-# ГЛОБАЛЬНЫЕ КОМАНДЫ ЧАТОВ
-# ==========================================
-
 @dp.message(Command("worldBan"), F.chat.id == ALLOWED_GROUP_ID)
 async def cmd_worldBan(message: types.Message):
     args = message.text.split()
@@ -876,6 +868,47 @@ async def cmd_mut_in_chat(message: types.Message):
         await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target_id, permissions=types.ChatPermissions(can_send_messages=False), until_date=until_date)
         await message.reply(f"🔇 Пользователь ограничен в этом чате на {minutes} минут.")
     except Exception as e: await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
+
+# --- КОМАНДА РАЗМУТА ---
+@dp.message(Command("unmut"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_unmut_in_chat(message: types.Message):
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    if member.status not in ['administrator', 'creator'] and message.from_user.id != ADMIN_ID: return
+    
+    args = message.text.split()
+    target_id = None
+    
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+    elif len(args) >= 2:
+        target_name = args[1].replace("@", "")
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute('SELECT user_id FROM user_profiles WHERE username = ? OR username = ?', (target_name, f"@{target_name}")) as cursor:
+                row = await cursor.fetchone()
+                if row: target_id = row[0]
+    
+    if not target_id:
+        await message.reply("⚠️ Пользователь не найден. Ответь на его сообщение или используй формат <code>/unmut @username</code>")
+        return
+        
+    try:
+        permissions = types.ChatPermissions(
+            can_send_messages=True,
+            can_send_audios=True,
+            can_send_documents=True,
+            can_send_photos=True,
+            can_send_videos=True,
+            can_send_video_notes=True,
+            can_send_voice_notes=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_invite_users=True
+        )
+        await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target_id, permissions=permissions)
+        await message.reply(f"🔊 Пользователь размучен и снова может писать в этот чат.")
+    except Exception as e:
+        await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
 
 @dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
 async def set_new_phrase(message: types.Message):
@@ -1022,7 +1055,8 @@ async def main():
     await bot.set_my_commands([
         BotCommand(command="top", description="Топ-42 активных участников"),
         BotCommand(command="call", description="Массовый сбор (только для админов)"),
-        BotCommand(command="mut", description="Выдать мут пользователю")
+        BotCommand(command="mut", description="Выдать мут пользователю"),
+        BotCommand(command="unmut", description="Снять мут с пользователя")
     ], scope=BotCommandScopeAllGroupChats())
     
     await auto_fetch_chats()
