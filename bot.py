@@ -1106,8 +1106,8 @@ async def main():
     await bot.set_my_commands([
         BotCommand(command="top", description="Топ-42 активных участников"),
         BotCommand(command="call", description="Массовый сбор (только для админов)"),
-        BotCommand(command="mut", description="Выдать мут пользователю"),
-        BotCommand(command="unmut", description="Снять мут с пользователя")
+        BotCommand(command="mut", description="Выдать мут пользователю (только для админов)"),
+        BotCommand(command="unmut", description="Снять мут с пользователя (только для админов)")
     ], scope=BotCommandScopeAllGroupChats())
     
     await auto_fetch_chats()
