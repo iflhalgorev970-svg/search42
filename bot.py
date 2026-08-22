@@ -21,6 +21,7 @@ from aiogram.types import (
     FSInputFile,
     BotCommand,
     BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
     LinkPreviewOptions 
 )
 from aiogram.client.default import DefaultBotProperties
@@ -263,7 +264,7 @@ async def global_middleware(handler, event: types.Message, data):
     return await handler(event, data)
 
 # ==========================================
-# АДМИНСКИЕ КОМАНДЫ (Перенесены вверх)
+# АДМИНСКИЕ КОМАНДЫ
 # ==========================================
 
 @dp.message(Command("chatid"))
@@ -651,13 +652,8 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
         admin_msg_to_user[sent_msg.message_id] = user.id
     except Exception as e: logging.error(f"Ошибка тикета: {e}")
 
-# ==========================================
-# ПЕРЕХВАТЧИК ЛС (САППОРТ СИСТЕМА)
-# ==========================================
-
 @dp.message(F.chat.type == "private")
 async def catch_all_pms(message: types.Message):
-    # Игнорируем любые команды со слэшем, чтобы они не летели в саппорт
     if message.text and message.text.startswith("/"): return
     if message.caption and message.caption.startswith("/"): return
 
@@ -671,10 +667,6 @@ async def catch_all_pms(message: types.Message):
         copied_msg = await message.copy_to(chat_id=ALLOWED_GROUP_ID, message_thread_id=REQUESTS_TOPIC_ID, reply_markup=kb)
         admin_msg_to_user[copied_msg.message_id] = message.from_user.id
     except Exception as e: logging.error(f"Ошибка пересылки ЛС: {e}")
-
-# ==========================================
-# АДМИНКА (КНОПКИ И ОБРАБОТЧИКИ НАКАЗАНИЙ)
-# ==========================================
 
 @dp.callback_query(F.data.startswith("punish:"))
 async def punish_menu(callback: types.CallbackQuery):
@@ -1010,7 +1002,17 @@ async def main():
     await init_db()
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
-    await bot.set_my_commands([BotCommand(command="top", description="Топ-42 активных участников")], scope=BotCommandScopeAllGroupChats())
+    
+    # 1. Принудительно удаляем кнопку "Меню" в личных сообщениях
+    await bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
+    
+    # 2. Устанавливаем команды ТОЛЬКО для групп (чтобы меню было там)
+    await bot.set_my_commands([
+        BotCommand(command="top", description="Топ-42 активных участников"),
+        BotCommand(command="call", description="Массовый сбор (только для админов)"),
+        BotCommand(command="mut", description="Выдать мут пользователю")
+    ], scope=BotCommandScopeAllGroupChats())
+    
     await auto_fetch_chats()
     await dp.start_polling(bot)
 
