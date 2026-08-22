@@ -22,6 +22,7 @@ from aiogram.types import (
     BotCommand,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
+    BotCommandScopeDefault,
     LinkPreviewOptions 
 )
 from aiogram.client.default import DefaultBotProperties
@@ -264,7 +265,7 @@ async def global_middleware(handler, event: types.Message, data):
     return await handler(event, data)
 
 # ==========================================
-# АДМИНСКИЕ КОМАНДЫ
+# АДМИНСКИЕ КОМАНДЫ (ЛС АДМИНА)
 # ==========================================
 
 @dp.message(Command("chatid"))
@@ -652,6 +653,10 @@ async def send_ticket_to_admins(user: types.User, lat=None, lon=None, note="", t
         admin_msg_to_user[sent_msg.message_id] = user.id
     except Exception as e: logging.error(f"Ошибка тикета: {e}")
 
+# ==========================================
+# ПЕРЕХВАТЧИК ЛС И НАКАЗАНИЯ
+# ==========================================
+
 @dp.message(F.chat.type == "private")
 async def catch_all_pms(message: types.Message):
     if message.text and message.text.startswith("/"): return
@@ -776,6 +781,10 @@ async def reply_from_group(message: types.Message):
             await message.copy_to(chat_id=target_user_id)
             await message.reply("✅ Ответ переслан пользователю!")
         except Exception as e: await message.reply(f"❌ Ошибка отправки (возможно, юзер заблокировал бота): {e}")
+
+# ==========================================
+# ГЛОБАЛЬНЫЕ КОМАНДЫ ЧАТОВ
+# ==========================================
 
 @dp.message(Command("worldBan"), F.chat.id == ALLOWED_GROUP_ID)
 async def cmd_worldBan(message: types.Message):
@@ -1003,10 +1012,13 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
-    # 1. Принудительно удаляем кнопку "Меню" в личных сообщениях
+    # 1. СНОСИМ ВООБЩЕ ВСЁ (Дефолтные настройки из BotFather)
+    await bot.delete_my_commands(scope=BotCommandScopeDefault())
+    
+    # 2. На всякий случай сносим конкретно из ЛС
     await bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
     
-    # 2. Устанавливаем команды ТОЛЬКО для групп (чтобы меню было там)
+    # 3. Накатываем команды ТОЛЬКО для групп
     await bot.set_my_commands([
         BotCommand(command="top", description="Топ-42 активных участников"),
         BotCommand(command="call", description="Массовый сбор (только для админов)"),
