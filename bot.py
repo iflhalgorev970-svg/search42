@@ -105,7 +105,13 @@ async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('''CREATE TABLE IF NOT EXISTS stats (
                             user_id INTEGER, chat_id INTEGER, user_name TEXT, message_count INTEGER DEFAULT 0,
+                            is_active INTEGER DEFAULT 1,
                             PRIMARY KEY (user_id, chat_id))''')
+        
+        # Обновление базы, если она старая (добавление колонки is_active)
+        try: await db.execute('ALTER TABLE stats ADD COLUMN is_active INTEGER DEFAULT 1')
+        except Exception: pass
+        
         await db.execute('''CREATE TABLE IF NOT EXISTS old_bot_chats (
                             chat_id INTEGER PRIMARY KEY, city_name TEXT)''')
         await db.execute('''CREATE TABLE IF NOT EXISTS user_profiles (
@@ -265,6 +271,39 @@ async def global_middleware(handler, event: types.Message, data):
     return await handler(event, data)
 
 # ==========================================
+# ОБРАБОТЧИК МЯГКОГО УДАЛЕНИЯ / ВОСКРЕШЕНИЯ
+# ==========================================
+@dp.chat_member()
+async def on_chat_member_update(event: types.ChatMemberUpdated):
+    user_id = event.new_chat_member.user.id
+    chat_id = event.chat.id
+    # Если юзер вышел, кикнут или забанен
+    if event.new_chat_member.status in ['left', 'kicked', 'banned']:
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Мягкое удаление (скрываем из топов)
+            await db.execute('UPDATE stats SET is_active = 0 WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+            await db.commit()
+    # Если юзер вернулся или его разбанили
+    elif event.new_chat_member.status in ['member', 'administrator', 'creator', 'restricted']:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute('UPDATE stats SET is_active = 1 WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+            await db.commit()
+
+@dp.message(F.left_chat_member)
+async def on_user_left_message(message: types.Message):
+    user_id = message.left_chat_member.id
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('UPDATE stats SET is_active = 0 WHERE user_id = ? AND chat_id = ?', (user_id, message.chat.id))
+        await db.commit()
+
+@dp.message(F.new_chat_members)
+async def on_user_join_message(message: types.Message):
+    async with aiosqlite.connect(DB_NAME) as db:
+        for user in message.new_chat_members:
+            await db.execute('UPDATE stats SET is_active = 1 WHERE user_id = ? AND chat_id = ?', (user.id, message.chat.id))
+        await db.commit()
+
+# ==========================================
 # АДМИНСКИЕ КОМАНДЫ (ЛС АДМИНА)
 # ==========================================
 
@@ -280,52 +319,43 @@ async def cmd_backup(message: types.Message):
 async def cmd_addchat_start(message: types.Message, state: FSMContext):
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.reply("⚠️ Использование: <code>/addchat <ID_чата> <Название города></code>\nНапример: <code>/addchat -1001234567890 Сочи</code>")
+        await message.reply("⚠️ Использование: <code>/addchat <ID_чата> <Название города></code>")
         return
-    
     chat_id_str = args[1]
     city_name = args[2]
-    if not chat_id_str.lstrip('-').isdigit():
-        await message.reply("❌ Неверный ID чата.")
-        return
-        
+    if not chat_id_str.lstrip('-').isdigit(): return
     chat_id = int(chat_id_str)
     await state.update_data(new_chat_id=chat_id, new_city_name=city_name)
     await state.set_state(AdminAddChat.waiting_country)
-    await message.reply(f"🏙 Город: <b>{city_name}</b>\n\n🌍 <b>Шаг 1/3:</b> Отправь название страны (например: <code>Россия</code>, <code>Беларусь</code>):", reply_markup=ReplyKeyboardRemove())
+    await message.reply(f"🏙 Город: <b>{city_name}</b>\n\n🌍 <b>Шаг 1/3:</b> Отправь название страны (например: <code>Россия</code>):", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(AdminAddChat.waiting_country, F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_addchat_country(message: types.Message, state: FSMContext):
     await state.update_data(new_country=message.text.strip())
     await state.set_state(AdminAddChat.waiting_link)
-    await message.reply("🔗 <b>Шаг 2/3:</b> Отправь ссылку-приглашение на этот чат (например: <code>https://t.me/...</code>):")
+    await message.reply("🔗 <b>Шаг 2/3:</b> Отправь ссылку-приглашение на этот чат:")
 
 @dp.message(AdminAddChat.waiting_link, F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_addchat_link(message: types.Message, state: FSMContext):
     await state.update_data(new_link=message.text.strip())
     await state.set_state(AdminAddChat.waiting_coords)
-    await message.reply("📍 <b>Шаг 3/3:</b> Теперь отправь координаты города.\nМожешь скинуть их через запятую (например: <code>43.58, 39.72</code>) или просто прикрепи <b>геопозицию</b> с карты:")
+    await message.reply("📍 <b>Шаг 3/3:</b> Отправь координаты города (например: <code>43.58, 39.72</code>) или прикрепи геопозицию:")
 
 @dp.message(AdminAddChat.waiting_coords, F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_addchat_coords(message: types.Message, state: FSMContext):
     lat, lon = None, None
     if message.location:
-        lat = message.location.latitude
-        lon = message.location.longitude
+        lat, lon = message.location.latitude, message.location.longitude
     else:
         try:
             parts = message.text.replace(' ', '').split(',')
-            lat = float(parts[0])
-            lon = float(parts[1])
+            lat, lon = float(parts[0]), float(parts[1])
         except:
-            await message.reply("❌ Ошибка формата. Отправь две цифры через запятую или скинь точку на карте (Геопозицию).")
+            await message.reply("❌ Ошибка формата. Отправь две цифры через запятую или точку на карте.")
             return
             
     data = await state.get_data()
-    chat_id = data['new_chat_id']
-    city_name = data['new_city_name']
-    country = data['new_country']
-    link = data['new_link']
+    chat_id, city_name, country, link = data['new_chat_id'], data['new_city_name'], data['new_country'], data['new_link']
     
     if country not in DATABASE: DATABASE[country] = {}
     DATABASE[country][city_name] = {"coords": (lat, lon), "link": link}
@@ -344,18 +374,14 @@ async def cmd_addchat_coords(message: types.Message, state: FSMContext):
     if chat_id in IGNORED_CHATS: IGNORED_CHATS.remove(chat_id)
         
     await state.clear()
-    await message.reply(f"✅ Город <b>{city_name}</b> ({country}) успешно добавлен!\n📍 Координаты: {lat}, {lon}\n\nТеперь он появился в меню поиска городов и доступен для авто-подбора по ГЕО! 🔥")
+    await message.reply(f"✅ Город <b>{city_name}</b> ({country}) успешно добавлен!\nТеперь он появился в меню поиска городов и доступен для авто-подбора по ГЕО! 🔥")
 
 @dp.message(Command("delchat"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_delchat(message: types.Message):
     args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply("⚠️ Использование: <code>/delchat <ID_чата></code>")
-        return
-        
+    if len(args) < 2: return
     chat_id_str = args[1]
     if not chat_id_str.lstrip('-').isdigit(): return
-        
     chat_id = int(chat_id_str)
     
     async with aiosqlite.connect(DB_NAME) as db:
@@ -373,7 +399,7 @@ async def cmd_delchat(message: types.Message):
         await db.commit()
         
     if chat_id in allowed_chats: allowed_chats.remove(chat_id)
-    await message.reply(f"🗑 Чат <code>{chat_id}</code> успешно удалён из белого списка и из меню поиска городов.")
+    await message.reply(f"🗑 Чат <code>{chat_id}</code> успешно удалён из белого списка.")
 
 @dp.message(Command("addsecret"), F.chat.type == "private", F.from_user.id == ADMIN_ID)
 async def cmd_addsecret(message: types.Message):
@@ -397,11 +423,9 @@ async def cmd_delsecret(message: types.Message):
     args = message.text.split()
     if len(args) < 2: return
     chat_id = int(args[1])
-    
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute('DELETE FROM secret_chats WHERE chat_id = ?', (chat_id,))
         await db.commit()
-        
     if chat_id in IGNORED_CHATS: IGNORED_CHATS.remove(chat_id)
     await message.reply(f"🗑 Чат <code>{chat_id}</code> удалён из секретного списка.")
 
@@ -425,7 +449,7 @@ async def handle_admin_files(message: types.Message):
             return
 
         chat_id = int(args[0])
-        await message.reply(f"⏳ Читаю выгрузку Telegram (JSON) для чата <code>{chat_id}</code>...")
+        status_msg = await message.reply(f"⏳ Читаю выгрузку (JSON) для чата <code>{chat_id}</code>...")
         
         file = await bot.get_file(message.document.file_id)
         await bot.download_file(file.file_path, destination="temp_export.json")
@@ -436,15 +460,11 @@ async def handle_admin_files(message: types.Message):
                 
             users_to_add = {}
             for msg in data.get("messages", []):
-                uid_str = None
-                uname = None
-                
+                uid_str, uname = None, None
                 if "from_id" in msg and "from" in msg:
-                    uid_str = str(msg["from_id"])
-                    uname = msg["from"]
+                    uid_str, uname = str(msg["from_id"]), msg["from"]
                 elif "actor_id" in msg and "actor" in msg:
-                    uid_str = str(msg["actor_id"])
-                    uname = msg["actor"]
+                    uid_str, uname = str(msg["actor_id"]), msg["actor"]
                     
                 if uid_str and uname:
                     if uid_str.startswith("user"): uid_str = uid_str.replace("user", "")
@@ -453,23 +473,38 @@ async def handle_admin_files(message: types.Message):
                         if uid > 0: users_to_add[uid] = uname
                         
             if not users_to_add:
-                await message.reply("⚠️ В файле не найдено ни одного пользователя.")
+                await status_msg.edit_text("⚠️ В файле не найдено ни одного пользователя.")
                 return
 
+            await status_msg.edit_text(f"⏳ Найдено {len(users_to_add)} пользователей в истории.\nСверяю их со списком текущих участников (вышедшие останутся в базе памяти, но будут спрятаны из топов)...")
+            
+            actual_active = 0
             async with aiosqlite.connect(DB_NAME) as db:
                 for uid, uname in users_to_add.items():
-                    await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count) 
-                                        VALUES (?, ?, ?, 1)
+                    is_active = 0
+                    try:
+                        member = await bot.get_chat_member(chat_id, uid)
+                        if member.status not in ['left', 'kicked', 'banned']:
+                            is_active = 1
+                    except Exception:
+                        pass # Юзер вышел или бот его не видит
+                    
+                    await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count, is_active) 
+                                        VALUES (?, ?, ?, 1, ?)
                                         ON CONFLICT(user_id, chat_id) DO UPDATE SET 
                                         message_count = CASE WHEN message_count = 0 THEN 1 ELSE message_count END,
-                                        user_name = excluded.user_name''', 
-                                        (uid, chat_id, uname))
+                                        user_name = excluded.user_name,
+                                        is_active = excluded.is_active''', 
+                                        (uid, chat_id, uname, is_active))
                     await db.execute('INSERT OR IGNORE INTO user_profiles (user_id, username) VALUES (?, ?)', (uid, uname))
+                    
+                    if is_active: actual_active += 1
+                    await asyncio.sleep(0.05) # Не спамим API Телеграма
                 await db.commit()
                 
-            await message.reply(f"✅ Добавлено <b>{len(users_to_add)}</b> уникальных пользователей!")
+            await status_msg.edit_text(f"✅ Готово! Сохранено в базу: <b>{len(users_to_add)}</b> чел.\nИз них сейчас активны в чате: <b>{actual_active}</b> чел.")
         except Exception as e:
-            await message.reply(f"❌ Ошибка при чтении файла JSON: {e}")
+            await status_msg.edit_text(f"❌ Ошибка при чтении файла JSON: {e}")
         finally:
             if os.path.exists("temp_export.json"): os.remove("temp_export.json")
 
@@ -501,9 +536,11 @@ async def find_chat_start(message: types.Message, state: FSMContext):
 @dp.message(F.text == "📊 Статистика", F.chat.type == "private")
 async def global_stats(message: types.Message):
     async with aiosqlite.connect(DB_NAME) as db:
+        # Учитываем только активных пользователей для глобальной статы
         query = '''SELECT o.city_name, SUM(s.message_count) as total 
                    FROM stats s 
                    JOIN old_bot_chats o ON s.chat_id = o.chat_id 
+                   WHERE s.is_active = 1
                    GROUP BY o.city_name 
                    ORDER BY total DESC LIMIT 10'''
         try:
@@ -514,12 +551,12 @@ async def global_stats(message: types.Message):
             row = await cursor.fetchone()
             total_personal = row[0] if row and row[0] else 0
 
-    text = "🌍 <b>Глобальный рейтинг городов:</b>\n\n"
+    text = "🌍 <b>Глобальный рейтинг городов (по активным участникам):</b>\n\n"
     if not rows: text += "Пока нет данных о статистике.\n"
     else:
         for i, (city, total) in enumerate(rows, 1): text += f"{i}. <b>{city}</b> — {total} сообщ.\n"
     
-    text += f"\n💬 <b>Твои сообщения во всех чатах:</b> {total_personal}"
+    text += f"\n💬 <b>Твоя общая история сообщений (во всех чатах):</b> {total_personal}"
     await message.answer(text)
 
 @dp.callback_query(F.data == "choose_country")
@@ -836,6 +873,8 @@ async def cmd_worldUnban(message: types.Message):
         
     await message.reply(f"🕊 <b>ГЛОБАЛЬНЫЙ РАЗБАН!</b>\nПользователь <code>{user_id}</code> удален из черного списка бота и разбанен в {success} чатах. Ему снова доступны все функции.")
 
+# --- КОМАНДЫ ДЛЯ МУТА/РАЗМУТА ---
+
 @dp.message(Command("mut"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_mut_in_chat(message: types.Message):
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
@@ -869,7 +908,6 @@ async def cmd_mut_in_chat(message: types.Message):
         await message.reply(f"🔇 Пользователь ограничен в этом чате на {minutes} минут.")
     except Exception as e: await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
 
-# --- КОМАНДА РАЗМУТА ---
 @dp.message(Command("unmut"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_unmut_in_chat(message: types.Message):
     member = await bot.get_chat_member(message.chat.id, message.from_user.id)
@@ -893,22 +931,15 @@ async def cmd_unmut_in_chat(message: types.Message):
         
     try:
         permissions = types.ChatPermissions(
-            can_send_messages=True,
-            can_send_audios=True,
-            can_send_documents=True,
-            can_send_photos=True,
-            can_send_videos=True,
-            can_send_video_notes=True,
-            can_send_voice_notes=True,
-            can_send_polls=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True,
-            can_invite_users=True
+            can_send_messages=True, can_send_audios=True, can_send_documents=True,
+            can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+            can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+            can_add_web_page_previews=True, can_invite_users=True
         )
         await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target_id, permissions=permissions)
         await message.reply(f"🔊 Пользователь размучен и снова может писать в этот чат.")
-    except Exception as e:
-        await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
+    except Exception as e: await message.reply(f"❌ Ошибка: У бота нет прав администратора или юзер админ.")
+
 
 @dp.message(Command("setphrase"), F.chat.id == ALLOWED_GROUP_ID)
 async def set_new_phrase(message: types.Message):
@@ -952,9 +983,10 @@ async def send_top_page(message_or_call, page):
     offset = page * limit
     
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT user_name, message_count FROM stats WHERE chat_id = ? AND message_count > 0 ORDER BY message_count DESC LIMIT ? OFFSET ?', (chat_id, limit, offset)) as cursor:
+        # Выбираем только АКТИВНЫХ пользователей (is_active = 1)
+        async with db.execute('SELECT user_name, message_count FROM stats WHERE chat_id = ? AND message_count > 0 AND is_active = 1 ORDER BY message_count DESC LIMIT ? OFFSET ?', (chat_id, limit, offset)) as cursor:
             rows = await cursor.fetchall()
-        async with db.execute('SELECT COUNT(*) FROM stats WHERE chat_id = ? AND message_count > 0', (chat_id,)) as cursor:
+        async with db.execute('SELECT COUNT(*) FROM stats WHERE chat_id = ? AND message_count > 0 AND is_active = 1', (chat_id,)) as cursor:
             total_users = (await cursor.fetchone())[0]
 
     if not rows and page == 0:
@@ -993,7 +1025,8 @@ async def cmd_call(message: types.Message):
     admin_text = parts[1] if len(parts) > 1 else ""
         
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ? AND message_count > 0', (chat_id,)) as cursor:
+        # Зовем только АКТИВНЫХ пользователей (is_active = 1)
+        async with db.execute('SELECT user_id, user_name FROM stats WHERE chat_id = ? AND message_count > 0 AND is_active = 1', (chat_id,)) as cursor:
             users = await cursor.fetchall()
             
     if not users: 
@@ -1034,8 +1067,9 @@ async def collect_stats(message: types.Message):
     await update_profile(message.from_user.id, message.from_user.username, chat_msg=True, chat_name=matched_city)
     
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count) VALUES (?, ?, ?, 1)
-                            ON CONFLICT(user_id, chat_id) DO UPDATE SET message_count = message_count + 1, user_name = excluded.user_name''', 
+        # Если юзер написал, мы гарантированно ставим ему is_active = 1
+        await db.execute('''INSERT INTO stats (user_id, chat_id, user_name, message_count, is_active) VALUES (?, ?, ?, 1, 1)
+                            ON CONFLICT(user_id, chat_id) DO UPDATE SET message_count = message_count + 1, user_name = excluded.user_name, is_active = 1''', 
                             (message.from_user.id, message.chat.id, message.from_user.full_name))
         await db.commit()
 
@@ -1045,13 +1079,9 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
-    # 1. СНОСИМ ВООБЩЕ ВСЁ (Дефолтные настройки из BotFather)
     await bot.delete_my_commands(scope=BotCommandScopeDefault())
-    
-    # 2. На всякий случай сносим конкретно из ЛС
     await bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
     
-    # 3. Накатываем команды ТОЛЬКО для групп
     await bot.set_my_commands([
         BotCommand(command="top", description="Топ-42 активных участников"),
         BotCommand(command="call", description="Массовый сбор (только для админов)"),
@@ -1060,7 +1090,7 @@ async def main():
     ], scope=BotCommandScopeAllGroupChats())
     
     await auto_fetch_chats()
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
     asyncio.run(main())
